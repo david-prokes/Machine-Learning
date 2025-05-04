@@ -1,0 +1,826 @@
+---
+title: "Ejercicio práctico 3"
+author: "David Prokes"
+date: "2024-12-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introducción
+Los datos de la práctica 3, *MicrodatosEPA.Rdata* corresponden a datos provenientes de la *Encuesta de Población Activa (EPA)* elaborada por el *Instituto Nacional de Estadística (INE)* con carácter trimestral, que permite obtener información sobre los ocupados, los parados y los inactivos.
+
+En cuanto a los datos en sí, existen numerosas variables recogidas para cada individuo sujeto a la encuesta, no obstante, el enunciado de la práctica 3 se centra especialmente en las siguientes variables:
+
+- ***ANYO***: Año de referencia.
+- ***TRIM***: Trimestre de referencia.
+- ***CICLO***: Período de referencia (año y trimestre).
+- ***TRAREM***: Si ha realizado un trabajo remunerado durante la semana pasada (1 - Sí, 0 - No), para personas de 16 a 89 años.
+- ***AOI***: Clasificación de los entrevistados por relación con la actividad económica según criterios OIT, para personas de 16 y más años.
+- ***SEXO1***: Sexo (Mujer/Hombre).
+- ***EDADNum***: Edad del encuestado.
+- ***ECIV1***: Estado civil legal, para personas de 16 o más años.
+- ***NAC1***: Nacionalidad (Por ejemplo: Española).
+- ***NFORMA***: Nivel de estudios, para personas de 16 y más años.
+- ***EDADEST***: Edad en la que se alcanzó el máximo nivel de estudios, para personas de 16 y más años, no analfabetas (7-110). 0 - No se sabe la fecha en la que alcanzó el máximo nivel de estudios.
+- ***DCOM***: Tiempo en meses en la empresa, representando la antigüedad.
+
+Cabe puntualizar los niveles asignados respecto a la variable *NFORMA*:
+
+- Analfabetos (código 01 en CNED-2014), (código 80 en CNED-2000)
+- Educación primaria incompleta (código 02 en CNED-2014), (código 11 en CNED-2000)
+- Educación primaria (código 10 en CNED-2014), (código 12 en CNED 2000) 
+- Primera etapa de educación secundaria (códigos 21-24 en CNED-2014), (códigos 21-23, 31, 36* en CNED-2000)
+- Segunda etapa de educación secundaria. Orientación general (código 32 en CNED-2014), (código 32 en CNED-2000)
+- Segunda etapa de educación secundaria. Orientación profesional (incluye educación postsecundaria no superior), (códigos 33-35, 38**, 41 en CNED-2014), (códigos 33, 34, 41 en CNED-2000)
+- Educación superior (códigos 51, 52, 61-63, 71-75, 81 en CNED-2014), (códigos 50-56, 59, 61 en CNED-2000)
+
+De igual manera, se exponen a continuación los niveles de la variable *AOI*:
+
+- Ocupados subempleados por insuficiencia de horas
+- Resto de ocupados
+- Parados que buscan primer empleo
+- Parados que han trabajado antes
+- Inactivos 1 (desanimados)
+- Inactivos 2 (junto con los desanimados forman los activos potenciales)
+- Inactivos 3 (resto de inactivos)
+
+## Preparación de los datos
+La primera parte consiste en el tratamiento de los datos. De modo que, cargaremos desde un inicio todas las librerías empleadas, así como, los microdatos de la Encuesta de Población Activa (EPA).
+```{r Librerías, echo = TRUE, results = 'hide', message = FALSE, warning = FALSE}
+library(here)
+library(dplyr)
+library(ggplot2)
+```
+
+```{r Datos}
+# La librería "here" es empleada para cargar los datos encontrados en la misma ubicación que el actual archivo .Rmd:
+load(here("MicrodatosEPA.Rdata"))
+
+# A continuación filtramos los datos para el año 2023. Seleccionamos las variables de interés establecidas por el enunciado creando varios df según el ejercicio.
+df = filter(Microdatos, ANYO == 2023) %>%          # Datos para el ejercicio 1.
+     select(TRIM, TRAREM, SEXO1, EDADNum, ECIV1, NAC1, NFORMA, EDADEST)
+
+df2 = filter(Microdatos, ANYO == 2023) %>%         # Datos para el ejercicio 2.
+      select(TRIM, AOI, SEXO1, EDADNum, ECIV1, NAC1, NFORMA, EDADEST)
+
+df3 = filter(Microdatos, ANYO == 2023) %>%         # Datos para el ejercicio 3.
+      select(DCOM, 1:43) # Seleccionamos las 43 primeras columnas junto a DCOM.
+```
+
+```{r Más librerías, echo = TRUE, results = 'hide', message = FALSE, warning = FALSE}
+library(margins)
+library(DiscriMiner)
+library(stats)
+library(MASS)
+library(biotools)
+library(pROC)
+library(tree)
+library(randomForest)
+library(gbm)
+library(e1071)
+```
+
+## Exploración de los datos
+En este apartado exploraremos los datos:
+```{r Exploración}
+# Comprobamos que no aparecen valores NA, y para el caso de EDADEST, comprobamos que no aparecen valores con 0:
+colSums(is.na(df)) ; sum(df["EDADEST"] == 0)
+
+# A continuación verificamos los valores únicos de cada variable, así como las estadísticas básicas para las columnas de edad:
+summary(df)
+
+# Comprobamos cuantas observaciones presentan un descuadre:
+sum(df$EDADNum < df$EDADEST)
+
+# A continuación calculamos la tasa de personas que sí han trabajado la semana anterior en los datos de 2023:
+mean(df$TRAREM == "Sí")
+
+# Aplicamos lo mismo para df2:
+colSums(is.na(df2)); summary(df2)
+```
+En la anterior inspección de los subconjuntos de datos *df* y *df2* se puede observar una falta de coherencia en los datos, donde el máximo de *EDADEST* es de 99 años, mientras que el máximo de *EDADNum* es de 67. Además, se puede ver que este descuadre de tener un mismo individuo un *EDADEST* mayor a su propia edad especificada en *EDADNum*, sucede en 9607 observaciones. Probablemente sería ideal eliminar dichos datos, aunque, al ser algo tan rebuscado y que no se ha comentado en clase, mantendremos estos datos. 
+
+En cuanto a los datos de 2023, vemos que alrededor del 43% de los encuestados trabajaron de manera remunerada la semana anterior a la que fueron encuestados. Por otro lado, los subconjuntos de datos cargados muestran una proporción similar de hombres y mujeres. Se observa también que la mayor parte de los encuestados poseen nacionalidad española y un estado civil de soltero o casado. Y finalmente, vemos una mayor proporción de encuestados con estudios de primera etapa de educación secundaria y con educación superior. Así como, una edad media de los encuestados de 49.57 años.
+
+## Ejercicio 1
+En el ejercicio 1 se nos pide realizar una regresión logística sobre si se ha realizado un trabajo
+remunerado la semana anterior (TRAREM) en función de los datos demográficos y de formación: género (SEXO1), edad (EDADNum), estado civil (ECIV1), nacionalidad (NAC1), nivel de formación (NFORMA) y edad en la que se alcanzó el máximo nivel de estudios (EDADEST); usando únicamente los datos de 1º, 2º y 3º trimestre de 2023 y para los mayores de 16 años.
+```{r 1}
+# Filtramos los datos para los tres primeros trimestres de 2023:
+dfM1 = filter(df, TRIM != 4)
+
+# Creamos la regresión logística solicitada:
+M1 = glm(TRAREM ~ SEXO1 + EDADNum + ECIV1 + NAC1 + NFORMA + EDADEST,
+         data = dfM1,
+         family = binomial)
+```
+
+**Apartado a)**: Comentar los resultados de la regresión. Interpreta el coeficiente de género y el de edad.
+```{r 1a}
+# Primeramente observamos las estimaciones del modelo:
+summary(M1)
+
+# Para calcular el efecto marginal de los coeficientes empleamos la librería margins. En este caso, al haber casi medio millón de observaciones, se trata de un proceso muy lento, ya que se calcula el efecto marginal promedio para todas las probabilidades estimadas en el modelo de todas las observaciones.
+M1margins = margins(M1, type = "response")
+```
+```{r Margins}
+M1margins
+```
+En los resultados de las estimaciones del modelo *M1*, vemos que todos los coeficientes presentan un p-valor inferior al 0.05, siendo todos los coeficientes estadísticamente significativos. En cuanto a los efectos de las variables sobre la probabilidad de haber realizado un trabajo remunerado en la semana anterior, se puede observar que:
+
+- Factores que afectan negativamente a la probabilidad: ser mujer respecto a ser hombre, la edad, y estar viudo respecto a estar soltero. 
+- Factores que afectan positivamente a la probabilidad: estar casado, separado o divorciado respecto a estar soltero; la educación y la edad con la que se adquirió el nivel máximo de formación; y tener nacionalidad española y doble nacionalidad, o tener nacionalidad extranjera, respecto a tener nacionalidad española.
+
+Así, el coeficiente de género sería de -0.9016933 y el efecto marginal extraído es en promedio de -0.08524554 (calculado para todas las observaciones). En otras palabras, ser mujer respecto a ser hombre reduce, en promedio, alrededor de 8.5 puntos porcentuales la probabilidad de haber trabajado de manera remunerada la semana anterior.
+
+Por otro lado, el coeficiente de edad es de -0.0324335 y el efecto marginal extraído es en promedio de -0.006473523. En otras palabras, por cada edad adicional del encuestado, la probabilidad de haber trabajado de manera remunerada en la semana anterior se reduce, en promedio, en 0.6 puntos porcentuales.
+
+**Apartado b)**: Dibujar la curva ROC del modelo y calcular el área bajo la curva.
+```{r 1b}
+# Calculamos primeramente las probabilidades predichas en los datos de entrenamiento:
+M1prediccionesROC = predict(M1, type = "response")
+
+# Ahora trazamos la curva ROC con las predicciones:
+M1ROC = roc(dfM1$TRAREM, 
+            M1prediccionesROC,
+            levels = c("No", "Sí"),
+            direction = "<")
+
+# Calculamos el área bajo la curva AUC para resumir el rendimiento general:
+M1AUC = auc(M1ROC)
+M1AUC
+
+# Creamos el gráfico de la curva ROC:
+plot(M1ROC,
+     col = "blue",
+     lwd = 2,
+     main = "ROC Curve",                        
+     xlab = "Tasa de Falso Positivo",
+     ylab = "Tasa de Verdadero Positivo",
+     legacy.axes = TRUE)
+```
+En la anterior gráfica se representa la curva ROC que compara la relación entre la tasa de verdaderos positivos con la tasa de falsos positivos. De modo que, a medida que aumentamos la probabilidad a partir de la cuál una observación se clasifica como positiva, mayor será la tasa de verdaderos positivos clasificados, así como, mayor será la tasa de falsos positivos.
+
+En este caso, la curva ROC está situada por encima de la línea diagonal, siendo el rendimiento del modelo mejor que el que tendría un clasificador aleatorio. No obstante, tiene un margen considerable de mejora para ajustar la curva ROC a la esquina superior izquierda. En concreto, vemos que el actual modelo presenta una relación entre las dos tasas tal que, aumentar el umbral para mejorar la tasa de verdaderos positivos, conllevaría un sacrificio significativo de elevar la tasa de falsos positivos.
+
+En cuanto al valor del área bajo la curva ROC, es decir el AUC, presenta un valor del 74.23%. En otras palabras, el AUC indica la probabilidad de que el modelo asigne una probabilidad mayor a un ejemplo positivo que a un ejemplo negativo elegido al azar. Viéndose que en el 74.23% de los casos asignaría con mayor probabilidad un caso positivo. Teniendo el modelo cierto poder de predicción aunque mejorable.
+
+**Apartado c)**: Predecir TRAREM de los datos del 4º trimestre de 2023 y compárelos con los observados. Comentar los resultados.
+```{r 1c}
+# Filtramos los nuevos datos para el cuarto trimestre:
+dfM1predicciones = filter(df, TRIM == 4)
+  
+# Calculamos las predicciones de las probabilidades para el cuarto trimestre:
+M1predicciones_prob = predict(M1, 
+                              newdata = dfM1predicciones, 
+                              type = "response")
+
+# Tal y como se vio en clase, primero clasificamos las predicciones:
+M1predicciones_val = ifelse(M1predicciones_prob > 0.5, "Sí", "No")
+
+# Posteriormente, creamos la tabla de contingencia:
+M1contingencia = table(Predicción = M1predicciones_val, Observado = dfM1predicciones$TRAREM)
+M1contingencia
+
+# Finalmente, calculamos la tasa de acierto y de error del modelo:
+M1acierto = mean(M1predicciones_val == dfM1predicciones$TRAREM)
+M1acierto
+M1error = mean(M1predicciones_val != dfM1predicciones$TRAREM)
+M1error
+```
+
+De esta manera vemos que, el modelo entrenado con los datos de los primeros tres trimestres predice el 66.80% de los datos de ***TRAREM*** del cuarto trimestre del mismo año. Lo que supone un ajuste mejor que el que haría un proceso aleatorio con 50% de probabilidad, aunque con una elevada tasa de error del 33%. Siendo deseable buscar mejores regresiones logísticas con mayor porcentaje de éxito teniendo en cuenta los pocos períodos que se han tomado en los datos de entrenamiento. Probablemente sería ideal tener en cuenta los datos trimestrales de años anteriores para poder predecir la estacionalidad que pudiera haber en los datos de ***TRAREM***, dada la alta presencia de empleo estacionario en España, así como, tener en cuenta el tipo de empleo o sector al que aspira el encuestado.
+
+**Apartado d)**: Si consideramos los datos de toda la población, la proporción que ha realizado un trabajo remunerado la semana anterior es del 45,94% en el 1º, 2º y 3º trimestre de 2023. ¿Cómo puede afectar esa información a la regresión logística estimada?
+```{r 1d}
+# Vamos a comparar la proporción que ha realizado un trabajo remunerado la semana anterior en los datos de entrenamiento:
+mean(dfM1$TRAREM == "Sí")
+```
+La ligera diferencia entre el 45.94% de la población y el 43.62% en los datos de entrenamiento indica que hay menos observaciones positivas de trabajo remunerado, en el conjunto de entrenamiento respecto a las presentadas en la población real. Entrando más en detalle, e una regresión logística, el intercepto se ajusta para reflejar la proporción de casos positivos en los datos de entrenamiento. Si la proporción real de la población es diferente, como en este caso, el intercepto estará ligeramente sesgado hacia la proporción de valores nulos, casos negativos. Esto puede hacer que las predicciones de probabilidad sean ligeramente subestimadas.
+
+## Ejercicio 2
+En el ejercicio 2 se nos pide realizar un análisis lineal discriminante para clasificar a los entrevistados en relación con la actividad económica (AOI) usando los mismos predictores que en el ejercicio anterior y con los datos del 1º, 2º y 3º trimestre de 2023.
+```{r 2}
+# Filtramos los datos para los tres primeros trimestres de 2023:
+dfM2 = filter(df2, TRIM != 4)
+
+# Creamos el modelo LDA solicitada:
+M2 = MASS::lda(AOI ~ SEXO1 + EDADNum + ECIV1 + NAC1 + NFORMA + EDADEST, 
+               data = dfM2)
+```
+
+**Apartado a)**: Comentar los resultados del LDA.
+```{r 2a}
+# Primeramente observamos las estimaciones del modelo:
+M2
+```
+En los resultados del modelo LDA previos, se exponen las probabilidades observadas para cada clase de la variable de respuesta, dentro de los datos de entrenamiento. Además de verse estas mismas probabilidades condicionadas para cada valor dado de las variables explicativas cualitativas en los datos observados. Así, podemos ver que las clases predominantes de la variable *AOI* en los datos son: Resto de ocupados (45.08%) y "Inactivos 3 (resto de inactivos)" (44.01%).
+
+Otro dato a destacar es la diferencia de edad promedio para cada clase en los datos observados, llamando la atención que los grupos de "Inactivos 3 (resto de inactivos)" y "Inactivos 1 (desanimados)" tienen mayores edades promedio (55.58 y 52 años respectivamente), mientras que los "Parados que buscan primer empleo" tienen una edad promedio significativamente menor (24.98 años). Por lo tanto, la *EDADNum* presenta indicios de ser una variable explicativa de gran importancia para clasificar las diferentes clases.
+
+Finalmente, en cuanto a los coeficientes de las funciones discriminantes, estas describen las combinaciones lineales de predictores que maximizan la separación entre los grupos. Siendo así, en este caso, un 87.75% de la variabilidad capturada por LD1, lo que indica que es la función discriminante más importante para separar los grupos. Por lo que, resulta de interés observar las variables con mayor peso en LD1 como:
+
+- *NFORMAEducación superior*: con el mayor coeficiente negativo de -2.0357, indicando que mayores niveles educativos, especialmente la educación superior respecto al valor base, tienden a estar asociados con clases específicas, tal y como hemos visto en las probabilidades previas al modelo con el grupo de "Resto de ocupados" (0.4695169).
+
+**Apartado b)**: Llevar a cabo el contraste de homogeneidad de Bartlett y el contraste M-Box sobre las dos variables numéricas según la variable de respuesta. Si la conclusión así lo indica, realizar el análisis discriminante cuadrático con validación cruzada.
+```{r 2b}
+# A continuación aplicamos el contraste de Bartlett, para verificar la homogeneidad de varianzas entre grupos:
+# Primero, extraemos los valores de interés creando dos matrices:
+t1 = cbind(dfM2$EDADNum, dfM2$AOI)
+t2 = cbind(dfM2$EDADEST, dfM2$AOI)
+
+# Combinamos las matrices en filas:
+t3 = rbind(t1, t2)
+
+# Aplicamos el Barlett test:
+bartlett.test(t3[,1], t3[,2])
+
+# Aplicamos también el contraste M-Box, preparando la matriz como hemos visto en clase:
+M2_MBox = matrix(c(dfM2$EDADNum, dfM2$EDADEST),
+                 nrow = length(dfM2$EDADNum))
+
+# Test M-Box:
+boxM(M2_MBox, dfM2$AOI)
+```
+El contraste de Barlett es utilizado para verificar la homogeneidad de las varianzas entre las distintas clases de la variable de respuesta. Siendo la hipótesis nula que las varianzas son iguales en todos los grupos. En este caso, vemos que el p-valor es menor a 0.05, rechazándose así la hipótesis nula. De modo que, las varianzas parecen ser heterogéneas entre clases, pudiéndose ver el rendimiento del LDA afectado y siendo las predicciones derivadas del modelo no fiables.
+
+El contraste de M-Box evalúa la igualdad de las matrices de covarianza entre los grupos definidos por la variable de respuesta en un análisis discriminante. Siendo la hipótesis nula que las matrices de covarianza son iguales entre los grupos de la variable de respuesta. En este caso, vemos de nuevo que el p-valor es menor a 0.05, rechazándose así la hipótesis nula. Por lo que, ambos contrastes indican la necesidad de aplicar otros modelos como el análisis discriminante cuadrático (QDA).
+
+```{r 2b2}
+# Creamos el modelo QDA:
+M2_QDA = MASS::qda(AOI ~ SEXO1 + EDADNum + ECIV1 + NAC1 + NFORMA + EDADEST, 
+                   data = dfM2)
+```
+
+**Apartado c)**: Predice AOI de los datos del 4º trimestre de 2023 con el modelo más adecuado y compárelos con los observados. Comentar los resultados.
+```{r 2c}
+# Filtramos los nuevos datos para el cuarto trimestre:
+dfM2predicciones = filter(df2, TRIM == 4)
+  
+# Calculamos las predicciones de las probabilidades para el cuarto trimestre:
+M2predicciones = predict(M2_QDA, dfM2predicciones)$class
+
+# Posteriormente, creamos la tabla de contingencia:
+M2contingencia = table(Predicción = M2predicciones, Observado = dfM2predicciones$AOI)
+M2contingencia
+
+# Finalmente, calculamos la tasa de acierto y de error del modelo:
+M2acierto = mean(M2predicciones == dfM2predicciones$AOI)
+M2acierto
+M2error = mean(M2predicciones != dfM2predicciones$AOI)
+M2error
+```
+
+En general, vemos que el modelo posee una tasa de acierto o de clasificación a la verdadera clase del 57.30% y una tasa de error del 42.70% para los datos del cuarto trimestre. Dichas tasas indican que el modelo tiene cierta capacidad predictiva, proporcionando un mayor acierto que el que haría un proceso aleatorio. A continuación normalizamos la tabla de contingencia por columnas y renombramos las clases para visualizarlo mejor. 
+
+```{r 2c2}
+M2contingencia_normalizada = prop.table(M2contingencia, margin = 2) * 100
+colnames(M2contingencia_normalizada) = c("Sub",
+                                         "Resto oc.",
+                                         "Par. 1º emp.",
+                                         "Parados",
+                                         "Inact. 1",
+                                         "Inact. 2",
+                                         "Inact. 3")
+
+rownames(M2contingencia_normalizada) = c("Sub",
+                                         "Resto oc.",
+                                         "Par. 1º emp.",
+                                         "Parados",
+                                         "Inact. 1",
+                                         "Inact. 2",
+                                         "Inact. 3")
+
+M2contingencia_normalizada
+```
+De esta manera podemos ver más fácilmente que, las clases donde se han presentado mayores tasas de error han sido en: 
+
+- *Sub* (Ocupados subempleados por insuficiencia de horas): donde la mayor parte se han clasificado erróneamente a Resto de ocupados, un 71.20% del grupo.
+- *Parados* (Parados que han trabajado antes): donde la mayor parte se han clasificado erróneamente a Resto de ocupados, un 68.96% del grupo.
+- *Inact. 1*, *Inact. 2* y *Inact. 3* han sido clasificados con una elevada proporción en Resto de ocupados, un 69.71%, 62% y 40.88% respectivamente. No obstante, *Inact. 3* ha obtenido una tasa de clasificación a la clase verdadera del 40.37% muy diferente de la obtenida en *Inact. 1* y *Inact. 2*, donde es prácticamente del 0-0.5% para ambas.
+
+Es decir, que el modelo sobrestima la probabilidad de pertenecer a la clase de Resto de ocupados (clase con mayor presencia observada) especialmente para todas aquellas clases que de por sí, presentaron una presencia muy baja en las probabilidades previas al modelo. Siendo el caso de *Inact. 1*, *Inact. 2*, *Parados* y *Sub*. Cabe mencionar que, pese a que desde un inicio *Par. 1º emp* tenía una baja presencia en los datos como las anteriores variables, la elevada diferencia en cuanto a su promedio de edad más bajo (24.98 años) determina que no tenga la elevada tasa de error que hemos comentado para el resto de clases.
+
+## Ejercicio 3
+En el ejercicio 3 se nos pide estudiar mediante árboles de regresión la antigüedad en la empresa (variable
+DCOM) con los datos del 1º, 2º y 3º trimestre de 2023, usando como predictores aquellos que se consideren dentro de los datos demográficos, de formación o trabajo dentro de la semana de referencia (columnas de la 1 a la 43 del data frame). Además de predecir DCOM de los datos del 4º trimestre de 2023 mediante bosques aleatorios y boosting. Comentando los resultados.
+
+Cabe puntualizar primeramente que, en el enunciado se especifica escoger las 43 primeras columnas del dataframe de Microdatos, no obstante, podría no tener sentido incluir todas las variables. Además, muchas de ellas están definidas bajo determinadas circunstancias.
+
+Por otra parte, los datos de *DCOM* son registrados únicamente para personas ocupadas. De modo que, se deduce que el objetivo del modelo es conocer la antigüedad para únicamente personas ocupadas, eliminando el resto de datos.
+
+Así, a continuación se puede ver que aparecen valores NA en las siguientes variables, dadas sus diferentes naturalezas:
+
+- ***NCONY, NPADRE, NMADRE***: todas ellas comparten la peculiaridad de únicamente presentar un valor en formato texto, cuando no residen en la misma vivienda o no tienen a la persona correspondiente (cónyugue, padre o madre). De este modo, suponemos que los valores NA son aquellos casos en los que sí se aplica la condición, por lo que sustituimos los valores NA por "Reside en la vivienda".
+- ***PRONA1***: indica la provincia de nacimiento para personas nacidas en España. De este modo, suponemos que los valores NA son aquellos casos en los que se ha nacido fuera de España, por lo que sustituimos los valores NA por "Extranjero".
+- ***REGNA1***: Indica la región del país extranjero de nacimiento para personas nacidas en el extranjero. De este modo, suponemos que los valores NA son aquellos casos en los que se ha nacido en España, por lo que sustituimos los valores NA por "España".
+- ***EXTREGNA***: Indica la región del país de la nacionalidad extranjera, para todas las personas con nacionalidad extranjera o doble nacionalidad. Sustituimos los valores NA por "España".
+- ***ANORE1***: Indica años de residencia en España Extranjeros o nacidos en España que han residido fuera del país por un período superior o igual a 1 año (0-99) y 0 para menos de un año en España. En este caso, suponemos que aquellos valores NA representan casos en los que se ha nacido en España y no se ha residido nunca fuera de España, por lo que sustituimos NA por la edad.
+- ***NCURSR***: Indica el nivel de los estudios reglados que cursa para todas las personas de 16 y más años que han cursado estudios reglados durante las 4 últimas semanas CNED 2014 (11-81) CNED 2000 (11-61). Por lo que, sustituimos los valores NA por "No estudia".
+- ***OBJFORM***: Indica el objetivo de la formación no reglada para todas las personas. Por lo que sería el mismo caso que el anterior, "No estudia".
+- ***AYUDFA***: Indica ayuda familiar, es decir, la realización de trabajo no remunerado empresa familiar para todas las personas que no trabajaron en la semana de referencia a cambio de remuneración. Por lo que, sustituimos los valores NA por "No aplica".
+- ***AUSENT***: Indica, a pesar de no haber trabajado ¿tenía un empleo o negocio? para todas las personas que no trabajaron en la semana de referencia a cambio de remuneración. Sustituimos NA por "No aplica".
+- ***RZNOTB***: Indica razones por las que no trabajó, teniendo empleo para todas las personas que no trabajaron la semana de referencia, ni ayudan en el negocio familiar, y tenían empleo.
+- ***VINCUL***: Indica la vinculación con el empleo de personas con empleo ausentes en la semana de referencia para personas que tenían un empleo del cual estaban ausentes la semana de referencia.
+- ***NUEVEM***: Indica si ha encontrado empleo para personas de 16 a 74 años sin empleo y que no han buscado uno en las cuatro últimas semanas.
+- ***SP***: Indica el tipo de administración en la que trabaja para todos los asalariados del sector público.
+- ***DUCON1, DUCON2 y DUCON3***: Indican si tiene contrato indefinido o temporal para todos los asalariados; relación laboral de carácter permanente o discontinuo para asalariados con contrato o relación laboral indefinidos; y tipo de contrato o relación laboral de carácter temporal para asalariados con contrato temporal.
+
+Obviar la siguiente parte, lo intenté pero es un proceso excesivamente tedioso.
+```{r 3, eval = FALSE}
+# Filtramos los datos para los tres primeros trimestres de 2023:
+dfM3 = filter(df3, TRIM != 4) %>%
+       filter(!is.na(DCOM)) %>%             # Eliminamos los valores NA de DCOM.
+       mutate(NCONY = ifelse(is.na(NCONY), "Reside en la vivienda", as.character(NCONY)),
+              NPADRE = ifelse(is.na(NPADRE), "Reside en la vivienda", as.character(NPADRE)),
+              NMADRE = ifelse(is.na(NMADRE), "Reside en la vivienda", as.character(NMADRE)),
+              PRONA1 = ifelse(is.na(PRONA1), "Extranjero", as.character(PRONA1)),
+              REGNA1 = ifelse(is.na(REGNA1), "España", as.character(REGNA1)),
+              EXREGNA1 = ifelse(is.na(EXREGNA1), "España", as.character(EXREGNA1)),
+              ANORE1 = ifelse(is.na(ANORE1), EDADNum, ANORE1),
+              NCURSR = ifelse(is.na(NCURSR), "No estudia", as.character(NCURSR)),
+              OBJFORM = ifelse(is.na(OBJFORM), "No estudia", as.character(OBJFORM)),
+              AYUDFA = ifelse(is.na(AYUDFA), "No aplica", as.character(AYUDFA)),
+              AUSENT = ifelse(is.na(AUSENT), "No aplica", as.character(AUSENT)),
+              RZNOTB = ifelse(is.na(RZNOTB), "No aplica", as.character(RZNOTB)),
+              VINCUL = ifelse(is.na(VINCUL), "No aplica", as.character(VINCUL)),
+              NUEVEM = ifelse(is.na(NUEVEM), "No aplica", as.character(NUEVEM)),
+              SP = ifelse(is.na(SP), "No aplica", as.character(SP)),
+              DUCON1 = ifelse(is.na(DUCON1), "No aplica", as.character(DUCON1)),
+              DUCON2 = ifelse(is.na(DUCON2), "No aplica", as.character(DUCON2)),
+              DUCON3 = ifelse(is.na(DUCON3), "No aplica", as.character(DUCON3)),
+              CICLO = droplevels(CICLO))
+
+# Transformamos a factores las variables que hemos modificado:
+dfM3 = dfM3 %>%
+  mutate(NCONY = as.factor(NCONY),
+         NPADRE = as.factor(NPADRE),
+         NMADRE = as.factor(NMADRE),
+         PRONA1 = as.factor(PRONA1),
+         REGNA1 = as.factor(REGNA1),
+         EXREGNA1 = as.factor(EXREGNA1),
+         NCURSR = as.factor(NCURSR),
+         OBJFORM = as.factor(OBJFORM),
+         AYUDFA = as.factor(AYUDFA),
+         AUSENT = as.factor(AUSENT),
+         RZNOTB = as.factor(RZNOTB),
+         VINCUL = as.factor(VINCUL),
+         NUEVEM = as.factor(NUEVEM),
+         SP = as.factor(SP),
+         DUCON1 = as.factor(DUCON1),
+         DUCON2 = as.factor(DUCON2),
+         DUCON3 = as.factor(DUCON3))
+
+# Eliminamos aquellas variables que no aportan información o tienen más de 32 categorías:
+dfM3 = dfM3 %>%
+       dplyr::select(-CICLO, -PROV, -NVIVI, -NPERS, -EDAD1, -RELPP1, -PRONA1, -RELLB1, -NUEVEM)
+
+# Redefinimos las etiquetas para nombres más cortos:
+dfM3$DUCON3 = factor(dfM3$DUCON3,
+                      levels = c("Cubre la ausencia total o parcial de otro trabajador",
+                                 "Cubre un período de prueba",
+                                 "De formación o aprendizaje",
+                                 "Estacional o de temporada",
+                                 "Eventual por circunstancias de la producción",
+                                 "No aplica",
+                                 "No sabe",
+                                 "Otro tipo",
+                                 "Para obra o servicio determinado",
+                                 "Verbal no incluido en las opciones anteriores"),
+                      labels = c("Ausencia", "Prueba", "Formación", "Temporal",
+                                 "Producción", "No aplica", "No sabe",
+                                 "Otro", "Obra/servicio", "Verbal"))
+
+
+
+# Comprobamos los valores NA que aparecen:
+colSums(is.na(dfM3))
+
+# Creamos el modelo de árboles de regresión solicitada:
+M3 = tree(DCOM ~ .,
+          data = dfM3)
+
+# Vemos los resultados:
+summary(M3)
+
+# Visualizamos el árbol:
+plot(M3)
+text(M3, pretty = 0)
+```
+
+```{r 32}
+# No me complico y quito todas las columnas con NA:
+dfM4 = filter(df3, TRIM != 4) %>%
+       filter(!is.na(DCOM)) %>%
+       dplyr::select(-CICLO, -PROV, -NVIVI, -NPERS, 
+                     -EDAD1, -RELPP1, -PRONA1, -RELLB1, 
+                     -NUEVEM, -AYUDFA, -AUSENT, -RZNOTB,
+                     -VINCUL, -EXREGNA1, -ANORE1, -NCONY,
+                     -NPADRE, -NMADRE, -NCURSR, -REGNA1,
+                     -DUCON3, -OBJFORM, -SP, -DUCON1, -DUCON2)
+
+dfM4$SITU = factor(dfM4$SITU,
+                    levels = c("Empresario con asalariados",
+                               "Trabajador independiente o empresario sin asalariados",
+                               "Miembro de una cooperativa",
+                               "Ayuda en la empresa o negocio familiar",
+                               "Asalariado sector público",
+                               "Asalariado sector privado",
+                               "Otra situación"),
+                    labels = c("Empresario",
+                               "Independiente",
+                               "Cooperativa",
+                               "Ayuda familiar",
+                               "Sector público",
+                               "Sector privado",
+                               "Otro"))
+
+dfM4$NAC1 = factor(dfM4$NAC1,
+                    levels = c("Española",
+                               "Española y doble nacionalidad",
+                               "Extranjera"),
+                    labels = c("Española",
+                               "Doble nacionalidad",
+                               "Extranjera"))
+
+
+# Comprobamos que no hay NA:
+colSums(is.na(dfM4))
+
+# Creamos el modelo de árboles de regresión solicitada:
+M4 = tree(DCOM ~ .,
+          data = dfM4)
+
+# Mostramos los resultados:
+summary(M4)
+
+# Graficamos el árbol de decisión:
+plot(M4)
+text(M4, pretty = 0)
+```
+
+La primera división se realiza en función de la variable EDADNum. Las personas con EDADNum < 49.5 van hacia el nodo izquierdo; de lo contrario, van hacia el nodo derecho. En cuanto a las subdivisiones, en el lado izquierdo:
+
+- Si EDADNum < 39.5, se predice un valor promedio de antigüedad de 50.57.
+- Si EDADNum >= 39.5, se predice un valor promedio de antigüedad de 132.10.
+
+En el lado derecho:
+
+- Si SITU es "Ayuda familiar" o "Sector privado", se realizan dos caminos:
+- Si la nacionalidad (NAC1) es "Doble nacionalidad" o "Extranjera", se predice un promedio de 92.80. De lo contrario, se predice un promedio de 191.80.
+- Si EDADNum < 59.5, se predice un promedio de 243.70.
+- Si EDADNum >= 59.5, se predice un promedio de 333.30.
+
+Hay que tener en cuenta que hablamos de meses de antigüedad en la empresa.
+
+```{r 33}
+# Creamos el dataset:
+dfM5 = filter(df3, TRIM != 4) %>%
+       dplyr::select(DCOM, EDADNum, SEXO1, ECIV1, NAC1, 
+                     NFORMA, EDADEST, CURSR, TRAREM) %>%
+       filter(!is.na(DCOM))
+
+dfM5predicciones = filter(df3, TRIM == 4) %>%
+                   dplyr::select(DCOM, EDADNum, SEXO1, ECIV1, NAC1, 
+                                 NFORMA, EDADEST, CURSR, TRAREM) %>%
+                   filter(!is.na(DCOM))
+
+# Creamos el modelo de árboles de regresión solicitada:
+M5_tree = tree(DCOM ~ .,
+               data = dfM5)
+
+# Creamos un randomForest con las variables que considero relevantes por intuición:
+set.seed(11631)
+train = sample(1:nrow(dfM5),1000)
+
+M5 = randomForest(DCOM ~ EDADNum + SEXO1 + ECIV1 + NAC1 + NFORMA + EDADEST + CURSR + TRAREM,
+                  data = dfM5,
+                  ntree = 200,
+                  subset = train)
+
+# Mostramos los resultados:
+summary(M5)
+
+# Predicciones
+pred_rf = predict(M5, newdata = dfM5predicciones)
+
+# Métricas de evaluación
+mse_rf = mean((pred_rf - dfM5predicciones$DCOM)^2)
+cat("MSE Random Forest:", mse_rf, "\n")
+
+
+# Ajuste del modelo Boosting:
+M3_gbm = gbm(DCOM ~ .,
+             data = dfM5predicciones,
+             distribution = "gaussian", 
+             n.trees = 200,
+             interaction.depth = 3,
+             shrinkage = 0.1,
+             cv.folds = 5)
+
+# Número óptimo de árboles
+best_iter = gbm.perf(M3_gbm, method = "cv")
+
+# Importancia de variables
+summary(M3_gbm)
+
+# Predicciones
+pred_gbm = predict(M3_gbm, newdata = dfM5predicciones, n.trees = best_iter)
+
+# Métricas de evaluación
+mse_gbm = mean((pred_gbm - dfM5predicciones$DCOM)^2)
+
+# Comparación de métodos:
+cat("MSE Árbol:", mean((predict(M5_tree, newdata = dfM5predicciones) - dfM5predicciones$DCOM)^2), "\n")
+cat("MSE Random Forest:", mse_rf, "\n")
+cat("MSE Boosting:", mse_gbm, "\n")
+```
+En términos generales, respecto al árbol de regresión estimado nuevamente, su árbol de decisión generado incluye nodos que dividen los datos en función de variables como EDADNum, SITU, y NAC1. Esto indica que la edad numérica y ciertos factores demográficos o laborales (situación laboral y nacionalidad) son relevantes para predecir la antigüedad en la empresa. Mientras que el error cuadrático medio (MSE) del árbol es de 12096.5. Aunque es un modelo interpretativo, el MSE sugiere que su precisión es menor que la de otros métodos como Random Forest o Boosting.
+
+En cuanto al Random Forest, que utiliza múltiples árboles, ofrece un mejor desempeño en términos de MSE (10787.61) en comparación con el modelo de árbol único. Esto es consistente con la naturaleza del Random Forest, que suele ser más robusto y generaliza mejor. Respecto a la importancia de las variables, la más importante es EDADNum, con una influencia relativa mucho mayor que otras variables. Otras variables como NAC1 y NFORMA también tienen relevancia, pero en menor medida.
+
+Finalmente, en cuanto al Boosting, el modelo también tiene un MSE de 10787.61, similar al Random Forest, aunque el método y la estructura del modelo son distintos. Esto implica que el Boosting y el Random Forest capturan patrones similares en los datos. En concreto, en Boosting, las variables más importantes incluyen NAC1 y ECIV1. Esto puede deberse a que Boosting es más sensible a relaciones complejas y patrones menores que el Random Forest.
+
+Asi, la variable clave se trata de EDADNum que aparece como la variable más importante en todos los modelos, lo que indica que la antigüedad está altamente correlacionada con la edad numérica. Mientras que, el mejor modelo entre Random Forest y Boosting, ambos son similares en desempeño, pero elegiría el Boosting, ya que puede capturar relaciones más complejas siendo perfecto para este caso donde se desea predecir el cuarto trimestre. Aunque, si el objetivo fuese la interpretabilidad, el árbol de regresión es la mejor opción.
+
+## Ejercicio 4
+En este ejercicio se nos pide aplicar el método que considere más apropiado a los datos de MicrodatosEPA.RData con la finalidad de predecir la actividad principal (la variable ACT1) del 4º trimestre de 2024 (los datos de este periodo serán publicados por el INE el 28 de enero de 2025). El modelo elegido debe tener el nombre “Pregunta_4” y el que presente el porcentaje de acierto más elevado entre todos los
+entregados tendrá un punto extra en la nota de la práctica 3.
+
+La variable ***ACT1*** comprende los siguientes niveles asignables:
+
+- Agricultura, ganadería, silvicultura y pesca (códigos CNAE-09: 01, 02 y 03), (códigos CNAE-93: 01, 02 y 05)
+- Industria de la alimentación, textil, cuero, madera y papel (códigos CNAE-09: del 10 al 18), (códigos CNAE-93 del 15 al 22)
+- Industrias extractivas, refino de petróleo, industria química, farmaceutica, industria del caucho y materias plásticas, suministro energía eléctrica, gas, vapor y aire acondicionado, suministro de agua, gestión de residuos. Metalurgia (códigos CNAE-09: del 05 al 09, del 19 al 25, 35 y del 36 al 39), (códigos CNAE-93: del 10 al 14, del 23 al 28, 40 y 41) 
+- Construcción de maquinaria, equipo eléctrico y material de transporte. Instalación y reparación industrial  (códigos CNAE-09 del 26 al 33), (códigos CNAE-93 del 29 al 37)
+- Construcción (códigos CNAE-09: del 41 al 43), (código CNAE-93: 45)
+- Comercio al por mayor y al por menor y sus instalaciones y reparaciones. Reparación de automóviles, hostelería (códigos CNAE-09: del 45 al 47, 55 y 56), (códigos CNAE-93: 50, 51, 52 y 55)
+- Transporte y almacenamiento. Información y comunicaciones (códigos CNAE-09 del 49 al 53 y del 58 al 63), (códigos CNAE-93 del 60 al 64)
+- Intermediación financiera, seguros, actividades inmobiliarias, servicios profesionales, científicos, administrativos y otros (códigos CNAE-09: del 64 al 66, 68, del 69 al 75 y del 77 al 82), (códigos CNAE-93 del 65 al 67 y del 70 al 74)
+- Administración Pública, educación y actividades sanitarias (códigos CNAE-09: 84, 85 y del 86 al 88), (códigos CNAE-93: 75, 80 y 85)
+- Otros servicios (códigos CNAE-09: del 90 al 93, del 94 al 96, 97y  99), (códigos CNAE-93: del 90 al 93, 95 y 99)
+
+En total son 9 niveles representativos del tipo de actividad económica en el que puede desempeñar un individuo. Siendo por tanto las variables seleccionadas en el dataset como esperables de que puedan afectar de manera significativa sobre el tipo de *ACT1* al que un individuo cualquiera se involucra. A continuación se incluyen algún apunte:
+
+- ***TRIM***: es una variable que podría predecir y clasificar ciertos empleos con alta estacionalidad.
+
+```{r 4}
+# Preparamos el dataset:
+dfP4 = dplyr::select(Microdatos, ACT1, TRIM, CCAA, EDADNum, SEXO1, ECIV1, NAC1, NFORMA, EDADEST, CURSR, AOI, TRAREM, ANYO) %>%
+        filter(!is.na(ACT1))
+
+# Comprobamos que no hay valores NA:
+colSums(is.na(dfP4))
+
+# Dividimos el dataset en entrenamiento (70%) y prueba (30%)
+set.seed(11631)
+train_indices = sample(1:nrow(dfP4), size = 0.7 * nrow(dfP4))
+train_data = dfP4[train_indices, ]
+test_data = dfP4[-train_indices, ]
+
+# Reducimos el tamaño del dataset de entrenamiento para acelerar el modelo
+set.seed(11631)
+train_data = train_data[sample(1:nrow(train_data), size = min(1000, nrow(train_data))), ]
+
+# Modelo 1: SVM con kernel lineal
+set.seed(11631)
+svm_linear = svm(ACT1 ~ ., data = train_data, kernel = "linear", cost = 1, scale = TRUE)
+
+# Predicciones y matriz de confusión para el kernel lineal
+pred_linear <- predict(svm_linear, test_data)
+conf_matrix_linear <- table(Predicted = pred_linear, Actual = test_data$ACT1)
+cat("Matriz de confusión para kernel lineal:\n")
+colnames(conf_matrix_linear) = c("Agr.",
+                               "Ind.alim.",
+                               "Ind.extr.",
+                               "Constr.maq.",
+                               "Constr.",
+                               "Comercio",
+                               "Transp.",
+                               "Financ.",
+                               "AAPP",
+                               "Otros")
+rownames(conf_matrix_linear) = c("Agr.",
+                               "Ind.alim.",
+                               "Ind.extr.",
+                               "Constr.maq.",
+                               "Constr.",
+                               "Comercio",
+                               "Transp.",
+                               "Financ.",
+                               "AAPP",
+                               "Otros")
+print(conf_matrix_linear)
+
+# Precisión del kernel lineal
+accuracy_linear <- sum(diag(conf_matrix_linear)) / sum(conf_matrix_linear)
+cat("Precisión del kernel lineal:", accuracy_linear, "\n")
+
+# Modelo 2: SVM con kernel radial
+set.seed(11631)
+svm_radial <- svm(ACT1 ~ ., data = train_data, kernel = "radial", cost = 1, gamma = 0.1, scale = TRUE)
+
+# Predicciones y matriz de confusión para el kernel radial
+pred_radial <- predict(svm_radial, test_data)
+conf_matrix_radial <- table(Predicted = pred_radial, Actual = test_data$ACT1)
+cat("Matriz de confusión para kernel radial:\n")
+colnames(conf_matrix_radial) = c("Agr.",
+                               "Ind.alim.",
+                               "Ind.extr.",
+                               "Constr.maq.",
+                               "Constr.",
+                               "Comercio",
+                               "Transp.",
+                               "Financ.",
+                               "AAPP",
+                               "Otros")
+rownames(conf_matrix_radial) = c("Agr.",
+                               "Ind.alim.",
+                               "Ind.extr.",
+                               "Constr.maq.",
+                               "Constr.",
+                               "Comercio",
+                               "Transp.",
+                               "Financ.",
+                               "AAPP",
+                               "Otros")
+print(conf_matrix_radial)
+
+# Precisión del kernel radial
+accuracy_radial <- sum(diag(conf_matrix_radial)) / sum(conf_matrix_radial)
+cat("Precisión del kernel radial:", accuracy_radial, "\n")
+
+# Modelo 3: SVM con kernel polinómico
+set.seed(11631)
+svm_poly <- svm(ACT1 ~ ., data = train_data, kernel = "polynomial", degree = 3, cost = 1, scale = TRUE)
+
+# Predicciones y matriz de confusión para el kernel polinómico
+pred_poly <- predict(svm_poly, test_data)
+conf_matrix_poly <- table(Predicted = pred_poly, Actual = test_data$ACT1)
+cat("Matriz de confusión para kernel polinómico:\n")
+colnames(conf_matrix_poly) = c("Agr.",
+                               "Ind.alim.",
+                               "Ind.extr.",
+                               "Constr.maq.",
+                               "Constr.",
+                               "Comercio",
+                               "Transp.",
+                               "Financ.",
+                               "AAPP",
+                               "Otros")
+rownames(conf_matrix_poly) = c("Agr.",
+                               "Ind.alim.",
+                               "Ind.extr.",
+                               "Constr.maq.",
+                               "Constr.",
+                               "Comercio",
+                               "Transp.",
+                               "Financ.",
+                               "AAPP",
+                               "Otros")
+print(conf_matrix_poly)
+
+# Precisión del kernel polinómico
+accuracy_poly <- sum(diag(conf_matrix_poly)) / sum(conf_matrix_poly)
+cat("Precisión del kernel polinómico:", accuracy_poly, "\n")
+
+# Modelo 4: SVM con kernel sigmoid
+set.seed(11631)
+svm_sigmoid <- svm(ACT1 ~ ., data = train_data, kernel = "sigmoid", cost = 1, scale = TRUE)
+
+# Predicciones y matriz de confusión para el kernel sigmoid
+pred_sigmoid <- predict(svm_sigmoid, test_data)
+conf_matrix_sigmoid <- table(Predicted = pred_sigmoid, Actual = test_data$ACT1)
+cat("Matriz de confusión para kernel sigmoid:\n")
+colnames(conf_matrix_sigmoid) = c("Agr.",
+                               "Ind.alim.",
+                               "Ind.extr.",
+                               "Constr.maq.",
+                               "Constr.",
+                               "Comercio",
+                               "Transp.",
+                               "Financ.",
+                               "AAPP",
+                               "Otros")
+rownames(conf_matrix_sigmoid) = c("Agr.",
+                               "Ind.alim.",
+                               "Ind.extr.",
+                               "Constr.maq.",
+                               "Constr.",
+                               "Comercio",
+                               "Transp.",
+                               "Financ.",
+                               "AAPP",
+                               "Otros")
+print(conf_matrix_sigmoid)
+
+# Precisión del kernel sigmoid
+accuracy_sigmoid <- sum(diag(conf_matrix_sigmoid)) / sum(conf_matrix_sigmoid)
+cat("Precisión del kernel sigmoid:", accuracy_sigmoid, "\n")
+
+# Optimización del modelo con kernel radial
+set.seed(11631)
+tune_radial <- tune(svm, ACT1 ~ ., data = train_data, kernel = "radial",
+                    ranges = list(cost = c(0.1, 1, 10), gamma = c(0.01, 0.1, 1)))
+
+# Resumen de la búsqueda
+cat("Resultados de la búsqueda de hiperparámetros para kernel radial:\n")
+summary(tune_radial)
+
+# Mejor modelo con kernel radial
+Pregunta_4 <- tune_radial$best.model
+
+# Predicciones y matriz de confusión para el mejor modelo
+best_pred <- predict(Pregunta_4, test_data)
+best_conf_matrix <- table(Predicted = best_pred, Actual = test_data$ACT1)
+cat("Matriz de confusión del mejor modelo (kernel radial):\n")
+colnames(best_conf_matrix) = c("Agr.",
+                               "Ind.alim.",
+                               "Ind.extr.",
+                               "Constr.maq.",
+                               "Constr.",
+                               "Comercio",
+                               "Transp.",
+                               "Financ.",
+                               "AAPP",
+                               "Otros")
+rownames(best_conf_matrix) = c("Agr.",
+                               "Ind.alim.",
+                               "Ind.extr.",
+                               "Constr.maq.",
+                               "Constr.",
+                               "Comercio",
+                               "Transp.",
+                               "Financ.",
+                               "AAPP",
+                               "Otros")
+print(best_conf_matrix)
+
+# Precisión del mejor modelo
+best_accuracy <- sum(diag(best_conf_matrix)) / sum(best_conf_matrix)
+cat("Precisión del mejor modelo (kernel radial):", best_accuracy, "\n")
+```
+
+
+```{r 41}
+# Preparamos el dataset:
+dfP4 = dplyr::select(Microdatos, ACT1, TRIM, CCAA, EDADNum, SEXO1, ECIV1, NAC1, NFORMA, EDADEST, CURSR, AOI, TRAREM, ANYO) %>%
+        filter(!is.na(ACT1))
+
+# Comprobamos que no hay valores NA:
+colSums(is.na(dfP4))
+
+# Dividimos el dataset en entrenamiento (70%) y prueba (30%):
+set.seed(11631)
+train_indices = sample(1:nrow(dfP4), size = 0.7 * nrow(dfP4))
+train_data = dfP4[train_indices, ]
+test_data = dfP4[-train_indices, ]
+
+# Reducimos el tamaño del dataset de entrenamiento para acelerar el modelo
+set.seed(11631)
+train_data = train_data[sample(1:nrow(train_data), size = min(8000, nrow(train_data))), ]
+
+# Entrenamos el modelo final con los mejores hiperparámetros
+Pregunta_4 = svm(ACT1 ~ ., data = train_data, kernel = "radial", cost = 1, gamma = 0.1)
+
+# Predicciones
+best_pred = predict(Pregunta_4, test_data)
+
+# Matriz de confusión
+best_conf_matrix = table(Predicted = best_pred, Observado = test_data$ACT1)
+cat("Matriz de confusión del mejor modelo (kernel radial):\n")
+colnames(best_conf_matrix) = c("Agr.",
+                               "Ind.alim.",
+                               "Ind.extr.",
+                               "Constr.maq.",
+                               "Constr.",
+                               "Comercio",
+                               "Transp.",
+                               "Financ.",
+                               "AAPP",
+                               "Otros")
+rownames(best_conf_matrix) = c("Agr.",
+                               "Ind.alim.",
+                               "Ind.extr.",
+                               "Constr.maq.",
+                               "Constr.",
+                               "Comercio",
+                               "Transp.",
+                               "Financ.",
+                               "AAPP",
+                               "Otros")
+print(best_conf_matrix)
+
+# Precisión
+best_accuracy = sum(diag(best_conf_matrix)) / sum(best_conf_matrix)
+cat("Precisión del mejor modelo:", best_accuracy, "\n")
+
+```
+Tras la búsqueda de hiperparámetros, se identificó que la combinación de cost=1 y gamma=0.1 presenta la menor tasa de error promedio (0.693) en la validación cruzada, lo que indica que esta configuración logra un buen balance entre capacidad predictiva y generalización. La baja dispersión (0.03062) asociada a esta combinación también sugiere que el modelo es consistente y que su rendimiento no depende en exceso de las particiones específicas de los datos. Una vez entrenado el modelo con cost=1 y gamma=0.1, la precisión del modelo en el conjunto de prueba será clave para evaluar su capacidad de generalización.
+
+Al observar la matriz de confusión, podemos determinar las áreas donde el modelo clasifica correctamente y las clases donde se presentan más errores.
+
+

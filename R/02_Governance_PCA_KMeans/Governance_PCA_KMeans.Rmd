@@ -1,0 +1,316 @@
+---
+title: "Ejercicio práctico 2: componentes principales y agrupación"
+author: "David Prokes"
+date: "2024-11-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introducción
+Los datos de la práctica 2, *wgidataset.xlsx* corresponden a los *Worldwide Governance Indicators* (WGI) elaborados por el *World Bank*, que miden diferentes aspectos de la buena gobernanza en una escala estándar de -2.5 (peor desempeño) a 2.5 (mejor desempeño).
+
+- ***Voice and Accountability (va)***: Participación ciudadana y libertades fundamentales. Valores altos reflejan mayor libertad y participación.
+- ***Political Stability and Absence of Violence/Terrorism (pv)***: Probabilidad de estabilidad política y ausencia de violencia. Valores altos indican entornos políticos seguros.
+- ***Government Effectiveness (ge)***: Calidad de servicios públicos y eficiencia gubernamental. Valores altos denotan administraciones eficaces y confiables.
+- ***Regulatory Quality (rq)***: Capacidad para formular políticas que favorecen el desarrollo económico. Valores altos indican regulaciones efectivas.
+- ***Rule of Law (rl)***: Confianza en normas sociales, sistemas judiciales y seguridad. Valores altos reflejan cumplimiento de leyes y baja criminalidad.
+- ***Control of Corruption (cc)***: Nivel de corrupción percibida. Valores altos representan menos corrupción y mayor transparencia institucional.
+
+De modo que, estos indicadores se derivan de múltiples fuentes, como encuestas de opinión, evaluaciones de expertos, organizaciones no gubernamentales, y datos de instituciones públicas y comerciales. Cada indicador está basado en variables de percepción y se normaliza para facilitar comparaciones entre países y a lo largo del tiempo.
+
+En cuanto a los datos en sí, estos se componen esencialmente de las siguientes variables:
+
+- ***codeindyr***: Identificador del registro.
+- ***code***: Identificador del país.
+- ***countryname***: País o región al que pertenecen los datos.
+- ***year***: Año en que se registran los datos.
+- ***indicator***: Indicador al que corresponden los datos.
+- ***esimate***: Valor correspondiente al indicador.
+- ***stddev***: Desviación estándar asociada al valor del indicador.
+- ***nsource***: Número de fuentes empleadas para el cálculo.
+- ***pctrank***: Percentil del indicador en una escala de 0 a 100, donde 100 indica el mejor desempeño relativo.
+- ***pctranklower y pctrankupper***: Intervalo inferior y superior del rango de percentiles estimados, reflejando la incertidumbre en el cálculo.
+
+## Preparación de los datos
+La primera parte consiste en el tratamiento de los datos. De modo que, cargaremos desde un inicio todas las librerías empleadas.
+```{r Librerías, echo = TRUE, results = 'hide', message = FALSE, warning = FALSE}
+library(here)
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(reshape2)
+```
+
+```{r Datos}
+# La librería "here" es empleada para cargar los datos encontrados en la misma ubicación que el actual archivo .Rmd.
+raw_df = read_xlsx(here("wgidataset.xlsx"))
+
+# A continuación filtramos los datos para el año 2023. Transformamos a formato numérico la columna "estimate". Solventamos el problema de muestras con valor ".." reemplazándolas por NA. Pivotamos los indicadores a columnas con sus respectivos valores, estableciendo como columna clave "countryname". Eliminamos aquellas filas que contienen valores NA.
+df = filter(raw_df, year == 2023) %>% 
+     mutate(across(estimate, ~ as.numeric(ifelse(. == "..", NA, .)))) %>%
+     pivot_wider(id_cols = countryname, names_from = indicator, values_from = estimate) %>%
+     na.omit() %>%                                   # Se eliminan 9 países o regiones de la muestra.
+     as.data.frame() %>%                             # Convertimos a Data.Frame.
+     {rownames(.) <- .$countryname; .} %>%           # Establecemos "countryname" como índice.
+     select(-countryname)                            # Eliminamos la columna "countryname".
+```
+
+## Exploración de los datos
+En este apartado exploraremos los datos:
+```{r Exploración}
+# Comprobamos que no existen valores NA:
+print(colSums(is.na(df)))
+
+# Comprobamos cuantos países se registran:
+print(paste0("Total de países: ",dim(df)[1]))
+
+# Observamos la media, el máximo y el mínimo de cada indicador:
+sapply(df, function(x) {
+  if (is.numeric(x)) {
+    c(mean = mean(x, na.rm = TRUE), 
+      max = max(x, na.rm = TRUE), 
+      min = min(x, na.rm = TRUE))
+  } else {
+    c(mean = NA, max = NA, min = NA)
+  }
+})
+```
+
+## Ejercicio 1
+En el ejercicio se nos piden diversas cuestiones relacionadas con la aplicación del análisis de componentes principales (ACP), teniendo en cuenta como características los 6 indicadores registrados para cada país o región. Cabe destacar que en el enunciado se menciona que los valores están estandarizados, de manera que para cada indicador y para cada año, tienen media nula y varianza unitaria.
+
+**Pregunta 1**: ¿A partir de la matriz de correlaciones, ¿tiene sentido realizar un análisis de componentes principales para estos indicadores?
+```{r 1.1}
+# Calculamos la matriz de correlaciones:
+correlaciones = cor(df)
+
+# Convertimos la matriz de correlaciones a formato largo:
+cor_data = melt(correlaciones)
+
+# Ajustamos el orden del eje y para invertir las filas:
+cor_data$Var2 = factor(cor_data$Var2, levels = rev(levels(cor_data$Var2)))
+
+# Creamos el gráfico con la diagonal en la orientación clásica:
+ggplot(cor_data, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "#B3E2E5", high = "#A994C9", mid = "#D8CAE6", midpoint = 0, 
+                       limit = c(-1, 1), space = "Lab", 
+                       name = "Correlación") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(vjust = 1, hjust = 0.5),  # Etiquetas horizontales.
+        axis.text = element_text(size = 10),  # Ajustar tamaño de las etiquetas.
+        plot.title = element_text(hjust = 0.5, face = "bold")) +  # Centrar y resaltar título.
+  coord_fixed() +  # Asegurar proporciones iguales.
+  labs(title = "Matriz de Correlación", x = NULL, y = NULL) + 
+  geom_text(aes(label = sprintf("%.2f", value)), color = "black", size = 3)
+```
+
+En la gráfica anterior se puede ver que los índices están altamente correlacionados entre sí, siendo la correlación mínima de 0.69 y la correlación máxima de 0.94. Esto podría indicar que las distintas características para los países muestran redundancias en los datos, es decir, patrones comunes que pueden resumirse en unos pocos componentes. Siendo la reducción de la dimensionalidad la finalidad del ACP y, por tanto, dando sentido a su aplicación en este caso.
+
+**Pregunta 2**: Interpreta las dos primeras componentes principales. ¿Qué variables contribuyen más a estas componentes?
+```{r 1.2}
+# Primeramente aplicamos el ACP a la muestra del año 2023, teniendo como características los 6 indicadores. Hay que tener en cuenta que al venir por defecto los datos de "estimate", que hemos pivotado por columnas, estandarizados no haría falta establecer el argumento scale=TRUE:
+ACP = prcomp(df, scale=FALSE)
+
+# A continuación observamos las cargas correspondientes a los dos primeros componentes principales:
+ACP$rotation[ ,1:2]
+```
+
+Podemos identificar que en el PC1 (primer componente principal) todos los indicadores obtienen un peso similar, dado que las correlaciones entre ellos son elevadas. No obstante, podemos destacar varios aspectos:
+
+- El indicador *pv*, cuyas correlaciones con el resto de indicadores son las más bajas, es el que obtiene un menor peso. De manera similar, el indicador de *va* obtiene una de las cargas más bajas, ya que el promedio de sus correlaciones es inferior.
+- El anterior punto se explica ya que el primer componente principal maximiza la varianza de tal manera que, otorga más peso a aquellas variables cuya correlación y varianza sean más elevadas. Así, aquellos indicadores que tienen en promedio mayores correlaciones como son *cc*, *ge*, *rl* y *rq*, obtienen una mayor carga en el PC1. 
+
+De manera similar, en el PC2 se distribuyen las cargas de manera que su dirección en el espacio de 6 dimensiones de las características sea perpendicular a la dirección del PC1. Por ello, aquellas variables que tenían ligeramente una menor carga en el PC1, como eran *pv* y *va*, ahora son las que poseen una mayor carga en PC2, y pueden aportar información sobre esa varianza residual que no explica PC1.
+
+Extrapolando la interpretación anterior a la realidad, podemos pensar que en países donde hay menor corrupción *cc*, es más probable o se presenta una relación más estrecha con que haya un gobierno eficaz *ge*, mayor confianza en las normas *rl* y regulaciones de alta calidad *rq*. Por lo que, el primer componente principal estaría agrupando un conjunto de características coherente que mide la capacidad institucional de un país, todo y que las cargas de las 6 características son relevantes de manera similar. Generalizando aspectos de la buena gobernanza en una sola variable.
+
+Mientras que, en el PC2, este indicador no está tan directamente relacionado con la eficacia del gobierno o la calidad regulatoria, sino con factores externos como:
+
+- La probabilidad de conflictos internos o violencia política.
+- La capacidad de un país para mantener la estabilidad frente a amenazas como el terrorismo.
+
+Es decir, en general el PC1 y PC2 nos están indicando que, hay países con buena calidad institucional (*cc*, *ge*, *rl*, *rq*) pero que pueden diferir ligeramente al enfrentar desafíos significativos de estabilidad política (*pv*,*va*), como democracias en transición.
+
+**Pregunta 3**: ¿Con cuantas componentes te quedarías? ¿Cuanta varianza de los datos originales se retendrá?
+```{r 1.3}
+# Para esta cuestión es esencial calcular la proporción de varianza explicada para cada componente (PVE):
+PVE = (ACP$sdev^2)/sum(ACP$sdev^2)
+
+# Aplicamos dos gráficas sencillas para visualizar el PVE y el PVE acumulado:
+# Proporción de varianza explicada
+plot(PVE, xlab = "Componentes principales", ylab = "PVE",
+     ylim = c(0, 1), type = "b", pch = 16, col = "#8FBBD9",
+     main = "Proporción de varianza explicada por componente",
+     lwd = 2, cex = 1.2)
+
+# Agregar una cuadrícula para mayor claridad
+grid(nx = NULL, ny = NULL, col = "gray", lty = "dotted")
+
+# Proporción acumulada de varianza explicada
+plot(cumsum(PVE), xlab = "Componentes principales", ylab = "PVE Acumulada",
+     ylim = c(0, 1), type = "b", pch = 16, col = "#A994C9",
+     main = "Proporción acumulada de varianza explicada",
+     lwd = 2, cex = 1.2)
+
+# Agregar una cuadrícula para mayor claridad
+grid(nx = NULL, ny = NULL, col = "gray", lty = "dotted")
+
+```
+
+En las gráficas anteriores, podemos ver que las elevadas correlaciones entre los 6 indicadores permiten reducir su redundancia prácticamente con el primer componente principal, donde se captura más del 80% de la varianza total de los datos, específicamente un 85.48%. Sumándose el segundo componente principal, vemos que se captura alrededor del 92% de la varianza total. Basándonos en el criterio del codo visto en la teoría, podríamos ver que la aportación de varianza explicada por cada componente se estabiliza a partir del segundo componente principal, siendo este el codo. De esta manera, con mantenerse con los dos primeros componentes principales se estaría afrontando un buen trade-off entre reducción de dimensiones y proporción total de la varianza explicada, ya que con el tercer componente principal capturaríamos únicamente un 4.59% más de la varianza total, que podría resultar en muchos casos poco significativo. Además de un mal trade-off entre reducción de la dimensionalidad y maximización de la varianza explicada.
+
+## Ejercicio 2
+En el ejercicio se nos piden diversas cuestiones acerca de la implementación del método de agrupación de k-means. Dicho método se basa en identificar grupos o subgrupos de observaciones que guardan similitudes entre sus características. En concreto, el algoritmo de k-means funciona de tal manera que, itera en las observaciones el cálculo de un centroide para cada clúster y después asigna cada observación al clúster cuya distancia euclidiana sea mínima.
+
+En este caso, suponemos que el ejercicio debe continuarse sobre los resultados obtenidos anteriormente, de modo que en la pregunta 1 del ejercicio, emplearemos dos componentes principales para implementar el k-means.
+
+**Pregunta 1**: ¿Cuantos grupos crees que se deberían formar?
+```{r 2.1}
+# Calculamos el WCV (la varianza dentro de cada clúster) y el total para cada uno de los k-means hasta k=10:
+TotalWCV = sapply(1:10, function(k) {
+  kmeans(ACP$x[ , 1:2], centers = k, nstart = 15)$tot.withinss
+})
+
+# Creamos una gráfica que visualice el total de los WCV ajustados por cada implementación de k-means hasta k=10:
+plot(1:10, TotalWCV, type = "b", 
+     pch = 16, lwd = 2, col = "#1f78b4",
+     xlab = "Número de Clusters K en k-means", 
+     ylab = "Total de WCV",
+     main = "Total de la suma de errores al cuadrado dentro de los clústers",
+     frame = FALSE, 
+     xaxt = "n",
+     yaxt = "n",
+     xlim = c(1, 10), ylim = c(0, max(TotalWCV) * 1.1))  # Ampliar el eje Y
+
+# Ejes personalizados:
+axis(1, at = 1:10, labels = 1:10, col.axis = "gray40", col.ticks = "gray40")  # Eje X
+axis(2, las = 1, col.axis = "gray40", col.ticks = "gray40")                   # Eje Y
+
+# Añadimos las etiquetas de valores en los puntos (ajustadas para K=1):
+text(1:10, TotalWCV, labels = round(TotalWCV, 1), 
+     pos = ifelse(1:10 == 1, 4, 3),
+     col = "gray40", cex = 0.8)
+
+# Añadimos una línea vertical para marcar el codo (ajustable visualmente):
+codo_k = 3
+abline(v = codo_k, col = "#e31a1c", lty = 2, lwd = 2)  # Línea roja discontinua.
+
+# Añadimos los puntos de interés destacados en el codo:
+points(codo_k, TotalWCV[codo_k], pch = 16, col = "#e31a1c", cex = 1.5)  # Punto rojo destacado.
+
+# Añadimos una cuadrícula suave:
+grid(col = "gray90", lty = 1)
+
+# Títulos y ajustes finales:
+legend("topright", legend = c("Codo identificado", "Curva total WCV"), 
+       col = c("#e31a1c", "#1f78b4"), lty = c(2, 1), lwd = 2, bty = "n", pch = c(16, NA), cex = 0.8)
+```
+
+Tal y como se explica en la teoría, un criterio para escoger el número de K clústers óptimo podría basarse en aquel del cual, se observa una caída fuerte (kink) en la suma total de los errores al cuadrado dentro de los clústers. Es un criterio similar a la búsqueda de un codo. Por ello, en el código anterior se calculan los totales de los WCV de cada clúster y para cada implementación de k-means hasta k=10.
+
+Aplicamos un nstart = 15 dentro de la función k-means tal y como se vio en clase, es decir, el algoritmo se ejecutará 15 veces con diferentes configuraciones iniciales y seleccionará la mejor solución (la que minimice la suma de cuadrados dentro de los clústers). Además, aplicamos hasta un k=10, ya que un mayor número de clústers en este caso podría resultar en un mal trade-off entre simplicidad de las agrupaciones y minimización del total de WCV.
+
+Así, vemos que, un k=3 o un k=4 podría resultar en un buen trade-off entre simplicidad de las agrupaciones y minimización del total de WCV. Podríamos pensar que, por ejemplo, la reducción en el total de los WCV al pasar de un k=3 a un k=4 podría no resultar tan significativa para tener que incluir una mayor complejidad al modelo con un clúster adicional. En resumen, un k=3 podría ser óptimo e incluso podría tener paralelismos con la típica clasificación de: países desarrollados, países en desarrollo y países subdesarrollados.
+
+Por tanto, con un k-means de k=3 estaríamos definiendo en base a los dos primeros componentes principales 3 clústers o tipos de países en función de la gobernanza, que podrían tener las siguientes características:
+
+- Clúster 1: unos buenos niveles de buena gobernanza entre los 6 indicadores.
+- Clúster 2: niveles moderados de buena gobernanza entre los 6 indicadores.
+- Clúster 3: niveles bajos de buena gobernanza entre los 6 indicadores.
+
+En la siguiente pregunta veremos si realmente los clústers representan los 6 indicadores con ponderaciones similares y si se representan los niveles generales de buena gobernanza.
+
+**Pregunta 2**: Haz un gráfico con los scores de las observaciones en las dos primeras primeras componentes principales (cp$x) y utiliza un código de color para indicar las agrupaciones de países que has obtenido con el método k-means. ¿A qué conclusión llegas? ¿crees que retener una sola componente principal es suficiente?
+```{r 2.2.1}
+#  Primero de todo creamos vectores correspondientes a cada uno de los dos primeros componentes principales calculados en la pregunta 2 del primer ejercicio:
+CP1 = ACP$x[ , 1]
+CP2 = ACP$x[ , 2]
+
+# Aplicamos una semilla para garantizar la reproducibilidad del código:
+set.seed(11)
+
+# Definimos el modelo de k-means con k=3 establecido como óptimo en el anterior punto:
+k3 = kmeans(ACP$x[ , 1:2], 3, nstart = 15)
+
+# Creamos un dataframe con los scores de los dos primeros componentes principales del ACP y las agrupaciones establecidas con k=3 en k-means:
+ACPk3 = data.frame(PC1 = CP1, PC2 = CP2, Cluster = factor(k3$cluster))
+
+# Generamos un gráfico que permita visualizar los scores, teniendo los componentes principales como ejes, y definiendo el clúster al que pertenece cada observación mediante el color:
+ggplot(ACPk3, aes(x = PC1, y = PC2, color = Cluster)) +
+  geom_point(size = 3, alpha = 0.8) +
+  scale_color_brewer(palette = "Set2") +
+  labs(title = "Scores de los dos primeros componentes principales",
+       x = "PC1",
+       y = "PC2",
+       color = "Cluster") +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "right")  # Leyenda a la derecha
+
+```
+
+En la gráfica anterior se visualizan los scores obtenidos para cada país en los dos primeros componentes principales, establecidos en un primer momento como la cantidad idónea a tener en cuenta en el ejercicio 1. Por otro lado, se distingue mediante el color la agrupación a la que pertenece cada observación o cada país mediante el método de k-means con k=3. De esta forma vemos que, realmente los scores del PC2 no influyen significativamente a la hora de definir los diferentes 3 grupos. Es decir, el PC1 parece ser suficiente para explicar las diferencias entre los 3 clústers de países. Esto tiene sentido ya que, como hemos visto en la Pregunta 3 del ejercicio 1, el primer componente principal abarca un 85.48% de la varianza total de los datos, muy diferente al 6.60% de varianza explicada del PC2.
+
+Por tanto, los 3 clústers podrían delimitarse perfectamente empleando únicamente los scores del PC1. Hay que tener en cuenta que de por sí, el PC1 agrupa todas las características con pesos similares, todo y que destacan los indicadores *cc*, *rl*, *rq*, *ge* por tener cargas ligeramente superiores de 0.4. Es decir, que ya PC1 contiene información suficiente para evaluar la buena gobernanza basados en estos 6 indicadores, y con una atención ligeramente especial al control de la corrupción, el estado de derecho, la calidad regulatoria y la eficacia gubernamental.
+
+Así, los clústers vendrían a agruparse en función de las siguientes características:
+
+- Clúster 1 (verde): países con buena gobernanza institucional, especialmente con un buen control de la corrupción, calidad regulatoria, un buen estado de derecho y eficacia gubernamental; y, en cierta manera también, buenos niveles de estabilidad política (estabilidad política y ausencia de violencia/terrorismo y voz y rendición de cuentas).
+- Clúster 2 (naranja): países con niveles moderados de buena gobernanza. Por ejemplo, países en desarrollo.
+- Clúster 3 (azul-morado):países con niveles bajos de buena gobernanza, es decir, representan países con instituciones débiles, baja estabilidad política y participación ciudadana limitada. Como ejemplo entrarían los países en desarrollo o subdesarrollados con conflictos políticos y gobernanza débil.
+
+Concretamente, a continuación se muestran los países agrupados para cada clúster (dentro de cada clúster los países se ordenan en función de sus scores en el PC1), donde podemos ver que el clúster 1 agrupa principalmente a países desarrollados. Esto tiene sentido ya que los países desarrollados suelen estar alineados con una buena gobernanza institucional. Mientras que, en el clúster 2 se puede ver una mayor variedad de países tanto países desarrollados como Grecia, países en desarrollo como Filipinas y países subdesarrollados como Ghana. Todos ellos destacan por tener al menos algún indicador de buena gobernanza que difiere del resto y que no permite agruparlos al clúster 1 o al clúster 3. Finalmente, en el clúster 3 veríamos países en guerra o con fuertes amenazas de inestabilidad política relacionadas con el PC2, como Ucrania o Afganistán, todo y que estos indicadores guardan una estrecha relación con los indicadores restantes también incluidos en el PC1; así como países subdesarrollados que registran valores bajos en todos los indicadores de buena gobernanza como Mali o Camerún.
+
+```{r 2.2.2}
+# Convertir los rownames en una columna
+paises <- ACPk3 %>%
+  tibble::rownames_to_column("Country") %>%  # Convertimos rownames en columna
+  select(Country, PC1, Cluster) %>%         # Seleccionamos las columnas necesarias
+  arrange(Cluster, desc(PC1))               # Ordenamos por Cluster y PC1 en orden descendente
+
+# Filtramos los países por Clúster:
+paisesC1 <- filter(paises, Cluster == 1) %>% select(Country)
+paisesC2 <- filter(paises, Cluster == 2) %>% select(Country)
+paisesC3 <- filter(paises, Cluster == 3) %>% select(Country)
+
+# Igualamos las longitudes de los vectores:
+max_length <- max(nrow(paisesC1), nrow(paisesC2), nrow(paisesC3))
+
+# Rellenamos con NA para igualar las longitudes:
+paisesC1 <- c(paisesC1$Country, rep(NA, max_length - nrow(paisesC1)))
+paisesC2 <- c(paisesC2$Country, rep(NA, max_length - nrow(paisesC2)))
+paisesC3 <- c(paisesC3$Country, rep(NA, max_length - nrow(paisesC3)))
+
+# Creamos el dataframe:
+paises_clusters <- data.frame(
+  Clúster_1 = paisesC1,
+  Clúster_2 = paisesC2,
+  Clúster_3 = paisesC3
+)
+
+# Mostramos la tabla:
+paises_clusters
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,275 @@
+---
+title: "Ejercicio práctico 1: validación cruzada"
+author: "David Prokes"
+date: "2024-11-04"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introducción
+En el enunciado se menciona la ecuación de Mincer que toma la siguiente expresión:
+$$ \ln(W_i) = \beta_0 + \beta_1 \cdot E_i + f(A_i) + \epsilon_i $$
+Donde f(A) no es definida. Dicha ecuación se pide que la aproximemos mediante los datos facilitados. En concreto los datos *EES_2022.RData* pertenecen a la encuesta de estructura salarial (EES) de España del año 2022, donde se recogen los salarios brutos anuales para cada individuo junto a otras variables de interés. Así, las variables que se especifican para la práctica son:
+
+- ***RETRINOIN***: Salario bruto anual no derivado de la incapacidad temporal.
+- ***ESTU***: Código de titulación comprendiendo:
+  - 1 Menos que primaria
+  - 2 Educación primaria
+  - 3 Primera etapa de educación secundaria
+  - 4 Segunda etapa de educación secundaria
+  - 5 Enseñanzas de formación profesional de grado superior y similares
+  - 6 Diplomados universitarios y similares
+  - 7 Licenciados y similares, y doctores universitarios
+- ***ANOANTI***: Años de antigüedad (proxy de experiencia laboral).
+- ***SEXO***: sexo donde 1 es hombre y 6 mujer.
+
+De tal manera que, el modelo a estimar tendría la siguiente forma:
+$$ \ln(Retri_i) = \beta_0 + \beta_1 Anti_1 + \beta_2 Anti_i^2 + ... + \beta_5 Anti_i^5 + beta_6 Estu_i + beta_7 Sexo_i $$
+
+## Preparación de los datos
+La primera parte consiste en el tratamiento de los datos. De modo que, cargaremos desde un inicio todas las librerías empleadas.
+```{r Librerías, echo = TRUE, results = 'hide', message = FALSE, warning = FALSE}
+
+library(here)
+library(dplyr)
+library(ggplot2)
+library(boot)
+
+
+```
+
+```{r Datos}
+
+# La librería "here" es empleada para cargar los datos encontrados en la misma ubicación que el actual archivo .Rmd.
+load(here("EES_2022.RData"))
+
+
+```
+
+A continuación aplicamos varias transformaciones a los datos:
+```{r Transformaciones}
+
+# Primeramente definimos un nuevo dataframe que contenga únicamente las variables de interés; transformamos las variables de tipo string en factores; realizamos un filtro para retribuciones superiores a 0, para poder aplicar logaritmos más adelante; y, finalmente, creamos una nueva variable como el logaritmo de las retribuciones.
+df = select(Microdatos, Retri = "RETRINOIN", Sexo = "SEXO", Estu = "ESTU", Anti = "ANOANTI") %>%
+  mutate(Sexo = factor(Sexo, levels = c(1,6), labels = c("Hombre", "Mujer")), 
+         Estu = factor(Estu, levels = 1:7)) %>%
+  filter(Retri > 0) %>% 
+  mutate(lnRetri = log(Retri)) %>% 
+  select(lnRetri, 1:4) # Ordenamos las columnas.
+
+# No existen valores NA en el dataframe.
+colSums(is.na(df))
+
+
+```
+
+## Exploración de los datos
+En este apartado exploraremos los datos visualizándolos:
+```{r Gráfico 1}
+
+# Gráfico de dispersión para retribución y antigüedad con color en base al sexo:
+ggplot(df) + 
+  geom_point(mapping = aes(x = Anti, y = lnRetri, color = Sexo, alpha = 0.5)) +
+  labs(title = "Relación entre retribución y antigüedad por sexo", 
+       x = "Antigüedad (años)", 
+       y = "Logaritmo de la Retribución") +
+  theme_minimal()
+
+
+```
+
+```{r Gráfico 2}
+
+# Histograma de educación con color en base al sexo:
+ggplot(df) + 
+  geom_bar(mapping = aes(x = Estu, fill = Sexo)) + 
+  labs(title = "Histograma de estudios") + 
+  theme_minimal()
+
+
+```
+
+```{r Gráfico 3}
+
+# Gráfico de dispersión entre retribución y antigüedad con color en base al nivel de estudios:
+ggplot(df) +
+  geom_point(mapping = aes(x = Anti, y = lnRetri, color = Estu)) +
+  labs(title = "Relación entre retribución y antigüedad por estudios", 
+       x = "Antigüedad (años)", 
+       y = "Logaritmo de la Retribución") +
+  theme_minimal()
+
+
+```
+
+En los gráficos anteriores vemos entonces, que existe cierta relación entre los años de antigüedad y el logaritmo de las retribuciones. En concreto, vemos que a mayor antigüedad, se presenta una menor dispersión en el logaritmo de las retribuciones. Esto sugiere la presencia de heterocedasticidad, ya que la varianza de las retribuciones no parece ser constante en todos los niveles de antigüedad.
+
+Respecto a los niveles de estudios, estos siguen el mismo patrón heterocedástico, aunque, en promedio, se puede ver que se relacionan mayores niveles de educación con mayores niveles del logaritmo de retribuciones. Por lo que tiene sentido incluirla en nuestro modelo. Al igual que con la variable Sexo, donde se observa que los hombres predominan más en valores más elevados del logaritmo de retribuciones. Así, se observa de antemano que existe cierta diferencia por género en las retribuciones.
+
+## Ejercicio 1
+En el ejercicio se nos pide que aproximemos el modelo de Mincer considerando hasta polinomios de grado 5 para la variable de *ANOANTI* (Anti), mediante validación cruzada de K-fold con K=10 y LOOCV (k=n) y usando como variable de control adicional *SEXO*.
+```{r Ejercicio 1}
+
+# Aplicamos el método de K-fold y LOOCV de la manera vista en clase.
+# Primero creamos un dataframe donde guardaremos las diferentes estimaciones del MSE (Error cuadrático medio) para cada modelo y método, donde, en total, se estimarán hasta 10 MSE.
+MSE = data.frame(matrix(NA, ncol=2, nrow=5))
+names(MSE) = c("K10", "LOOCV")
+rownames(MSE) = paste("Anti_d", 1:5, sep="") # d se refiere a "degree" del polinomio de Anti incluido.
+
+# Así las columnas equivalen a los modelos estimados por cada método, ya sea K-fold con K=10, o bien, LOOCV con K=n. Mientras que las filas almacenan los MSE extraídos de cada modelo donde el polinomio de Anti varía de grado 1 a 5.
+
+# K10: Aplicamos un bucle donde se irán estimando los diferentes modelos con polinomios de Anti de grado 1 a 5.
+for(d in 1:5){
+  modelo = glm(lnRetri ~ Sexo + poly(Anti, d) + Estu, data = df)
+  MSE[d, 1] = cv.glm(df, modelo, K=10)$delta[1]
+}
+
+# Para el bucle de LOOCV, calcularemos el MSE con la fórmula vista en clase, para minimizar el costo computacional. Así, la siguiente fórmula se aproxima con bastante precisión al MSE que sería estimado por LOOCV originalmente.
+loocv=function(modelo){
+  h = lm.influence(modelo)$h
+  mean((residuals(modelo) / (1-h))^2)
+}
+
+# LOOCV: Aplicamos un bucle donde se irán estimando los diferentes modelos con polinomios de Anti de grado 1 a 5.
+for(d in 1:5){
+  modelo = glm(lnRetri ~ Sexo + poly(Anti, d) + Estu, data = df)
+  MSE[d, 2] = loocv(modelo)
+}
+
+# A continuación se busca el modelo que minimiza el MSE y vemos que tanto por el método de K10 como con LOOCV, el modelo con polinomio de Anti de grado 5 es la mejor aproximación en base al criterio de MSE.
+filter(MSE, K10 == min(K10) | LOOCV == min(LOOCV))
+
+# El modelo, por tanto, seleccionado será:
+modelo_d5 = glm(lnRetri ~ Sexo + poly(Anti, 5) + Estu, data = df)
+
+# Podemos calcular el R^2 y R^2 ajustado para evaluar su bondad de ajuste.
+r_squared = 1 - (sum(residuals(modelo_d5)^2) / sum((df$lnRetri - mean(df$lnRetri))^2))
+r_squared_adj <- 1 - ((1 - r_squared) * (nrow(df) - 1) / (nrow(df) - length(coef(modelo_d5))))
+
+# A continuación  se exponen los resultados del modelo:
+summary(modelo_d5)
+
+
+```
+**Comentario**: Respecto al modelo óptimo seleccionado, este se trata de aquel que incluye un polinomio de la variable antigüedad (Anti) de grado 5. El criterio de decisión empleado ha sido seleccionar el modelo cuyo MSE (Error Cuadrático Medio) fuese mínimo. Así, el MSE de validación ha sido estimado para cada uno de los modelos con polinomio de antigüedad de diferente grado.
+$$ \ln(Retri_i) = \beta_0 + \beta_1 Anti_1 + \beta_2 Anti_i^2 + ... + \beta_5 Anti_i^5 + beta_6 Estu_i + beta_7 Sexo_i $$
+Hay que tener en cuenta que la expresión anterior no es del todo exacta, ya que la antigüedad se ha tratado mediante polinomios ortogonales. Es decir, que los coeficientes de Anti no son interpretables.
+
+En concreto, el método de K-fold, estableciendo K=10, divide el total de la muestra en 10 submuestras, donde para cada una se la excluye de las 9 partes restantes, ajustando un modelo para las nuevas submuestras y probando las predicciones para la submuestra excluida. Así, se extrae una estimación del MSE de validación, es decir, una estimación del error del modelo frente a datos fuera de la muestra de entrenamiento. 
+
+Por otro lado, el LOOCV es similar al K-fold, pero con la diferencia de que K es equivalente a n (tamaño de la muestra total). Así, se trata de un método que cuenta con un coste computacional muy elevado, pero permite reducir el sesgo del MSE considerablemente. En la solución, se emplea la función vista en clase que aproxima con precisión el MSE de validación que estimaría el LOOCV. Podemos ver que, así como se vio en la teoría, el MSE de prueba estimado por LOOCV y por un K10 son muy similares.
+
+Continuando con la cuestión del ejercicio, en el modelo seleccionado se incluye la variable dummy de Sexo, cuyo coeficiente es de -0.35. Cabe destacar que todos los coeficientes del modelo son significativos, por tanto, el sexo tiene algún tipo de influencia sobre la retribución en nuestro modelo. Entrando más en detalle, para interpretar el coeficiente de la variable Sexo, debemos aplicar al transformación exponencial:
+$$ exp(\beta_{\text{sexo}}) = exp(-0.352187) = 0.7031486 $$
+Es decir, las mujeres ganan un salario promedio que es aproximadamente 70,31% del salario de los hombres. Esto significa que las mujeres ganan aproximadamente un 29.69% menos que los hombres, manteniendo constante el efecto de las otras variables. Por lo que, no podemos descartar que existe brecha salarial de género en promedio según nuestro modelo.
+
+## Ejercicio 2
+En este ejercicio, se pide extender el modelo anterior de tal manera que considere la posibilidad de retribuir la experiencia de manera diferente en función del sexo. De tal manera que incluimos una nueva variable como la combinación entre antigüedad y sexo. Esta variable deberá aplicarse a los polinomios ortogonales respectivos, en lugar de únicamente la antigüedad como en el anterior ejercicio.
+$$ Anti_i Sexo_i $$
+Con todo esto, aplicaremos el mismo proceso que en el ejercicio 1, ya que la inclusión de esta nueva variable puede cambiar el ajuste óptimo del polinomio de la variable nueva.
+```{r Ejercicio 2}
+
+# Aplicamos el método de K-fold y LOOCV.
+# Primero creamos un dataframe donde guardaremos las diferentes estimaciones del MSE (Error cuadrático medio) para cada modelo y método.
+MSE2 = data.frame(matrix(NA, ncol=2, nrow=5))
+names(MSE2) = c("K10", "LOOCV")
+rownames(MSE2) = paste("Anti_d", 1:5, sep="")
+
+# Así las columnas equivalen a los modelos estimados por cada método, ya sea K-fold con K=10, o bien, LOOCV con K=n. Mientras que las filas almacenan los MSE extraídos de cada modelo donde el polinomio de Anti varía de grado 1 a 5.
+
+# K10: Aplicamos un bucle donde se irán estimando los diferentes modelos con polinomios de Anti de grado 1 a 5.
+for(d in 1:5){
+  modelo = glm(lnRetri ~ Sexo * poly(Anti, d) + Estu, data = df)
+  MSE2[d, 1] = cv.glm(df, modelo, K=10)$delta[1]
+}
+
+# Para el bucle de LOOCV, calcularemos el MSE con la fórmula vista en clase:
+loocv=function(modelo){
+  h = lm.influence(modelo)$h
+  mean((residuals(modelo) / (1-h))^2)
+}
+
+# LOOCV: Aplicamos un bucle donde se irán estimando los diferentes modelos con polinomios de Anti de grado 1 a 5.
+for(d in 1:5){
+  modelo = glm(lnRetri ~ Sexo * poly(Anti, d) + Estu, data = df)
+  MSE2[d, 2] = loocv(modelo)
+}
+
+# A continuación se busca el modelo que minimiza el MSE y vemos que tanto por el método de K10 como con LOOCV, el modelo con polinomio de Anti de grado 5 es la mejor aproximación en base al criterio de MSE.
+filter(MSE2, K10 == min(K10) | LOOCV == min(LOOCV))
+
+# El modelo, por tanto, seleccionado será:
+modelo_d5_2 = glm(lnRetri ~ Sexo * poly(Anti, 5) + Estu, data = df)
+
+# Podemos calcular el R^2 y R^2 ajustado para evaluar su bondad de ajuste.
+r_squared_2 = 1 - (sum(residuals(modelo_d5_2)^2) / sum((df$lnRetri - mean(df$lnRetri))^2))
+r_squared_adj_2 <- 1 - ((1 - r_squared_2) * (nrow(df) - 1) / (nrow(df) - length(coef(modelo_d5_2))))
+
+# A continuación  se exponen los resultados del modelo:
+summary(modelo_d5_2)
+
+
+```
+
+**Comentario**: Así, vemos que de nuevo el modelo óptimo (modelo 2) seleccionado se trata de aquel que incluye el polinomio, ahora entre el producto de Sexo y Antigüedad, de grado 5. Por lo que la inclusión de esta nueva interacción entre Sexo y Antigüedad no ha cambiado el ajuste óptimo del polinomio. No obstante, sí se aprecia ligeramente una reducción en la estimación del MSE de validación para el nuevo modelo:
+$$ MSE_1^{\text{K10}} = 0.4025 > 0.4021 = MSE_2^{\text{K10}}  $$
+En cuanto al R ajustado de ambos modelos vemos que existe una pequeña diferencia:
+$$ R^2_1 = 0.3856 < 0.3863 = R^2_2 $$
+De modo que, el rendimiento del modelo ha experimentado una mejora, pero poco significativa. Siendo ambos modelos prácticamente igual de predictivos para las retribuciones. No obstante, en el nuevo modelo (modelo 2), vemos que todos los coeficientes son significativos a excepción del parámetro de la variable *SexoMujer:poly(Anti, 5)4*. Aquí podría estimarse otro modelo excluyendo dicha variable. Todo y que, la mejora poco significativa en términos de R ajustado y MSE sugiere que deberíamos de quedarnos con el modelo 1, atendiendo al criterio de parsimonia vs blackbox.
+
+En cuanto a la variable dummy de SexoMujer sigue manteniendo el mismo coeficiente que en el modelo 1, no obstante, para tener en cuenta el efecto total de ser mujer sobre el logaritmo de la retribución, se debería de tener en cuenta la interacción con el polinomio ortogonal de antigüedad. Por otro lado, algunos términos de  esta interacción entre SexoMujer y los distintos grados del polinomio de Anti son significativos, lo que sugiere que la relación entre antigüedad y salario no es la misma para ambos géneros. Por tanto, sí se observa una brecha salarial por razón de sexo que, con la información disponible, podría interpretarse como discriminación salarial.
+
+Finalmente, la variable de Estu (niveles de estudios) vemos que tanto en el modelo 1 como en el modelo 2 son significativos. Es decir, el nivel de estudios tiene un efecto positivo sobre el salario, lo cual implica que a medida que el nivel educativo aumenta, también lo hace el salario promedio. Todos los coeficientes de las variables dummy de Estu son positivos y crecientes a medida que se aumenta el nivel de estudios, siempre respecto al nivel de estudios 1 de referencia.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
