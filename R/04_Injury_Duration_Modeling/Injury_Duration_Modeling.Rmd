@@ -1,0 +1,1137 @@
+---
+title: "Entrega final"
+author: "David Prokes"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+## Introducción
+En el presente trabajo se han asignado el dataframe de *injury* de la librería *wooldridge* y la semilla aleatoria 641. Siendo solicitada a emplear a lo largo del documento como variable dependiente a predecir *ldurat*. Concretamente, en el documento *Entrega final.Rmd* puede verse con mayor detalle el procedimiento completo mediante código de los resultados expuestos en este documento. Mostrándose aquí, por tanto, aquellos resultados que se consideran relevantes.
+
+## Preparación de los datos
+En cuanto a la preparación inicial de los datos del dataframe *injury*, primeramente, se han cargado todas las librerías necesarias, así como se han transformado a variables de tipo factor todas aquellas variables cualitativas con más de 2 niveles (no binarias). Por otra parte, se dividen los datos en dos conjuntos: 85% de los datos para entrenamiento y el 15% de prueba.
+```{r Librerías, message = FALSE}
+rm(list=ls())
+cat("\014")
+library(wooldridge)
+library(dplyr)
+library(ggcorrplot)
+library(psych)
+library(car)
+library(leaps)
+library(ggplot2)
+library(glmnet)
+library(pls)
+```
+
+```{r Datos, message = FALSE}
+# Cargamos el dataframe:
+data(injury)
+attach(injury)
+
+# Transformamos a factor las variables cualitativas no binarias:
+df = mutate(injury, 
+            indust = as.factor(indust), 
+            injtype = as.factor(injtype))
+
+# Ignoramos por el momento los datos NA, ya que depende de las variables que
+# seleccionemos se eliminarán más o menos observaciones.
+
+# Establecemos la semilla para dividir en muestras aleatorias los datos:
+set.seed(641)
+
+# Dividimos los datos en train (85%) y prueba (15%):
+train_id = sample(1:nrow(df), 
+                  size = (0.85 * nrow(df)))
+
+df_train = df[train_id,]
+df_prueba = df[-train_id,]
+```
+
+## (1)
+El conjunto de datos de *injury* pertenece a la colección de datos empleada en el libro de *Wooldridge, Introducción a la Econometría: Un Enfoque Moderno*, accesible mediante la librería *wooldridge*. Concretamente, *injury* procede del artículo: *B.D. Meyer, W.K. Viscusi, and D.L. Durbin (1995), “Workers’ Compensation and Injury Duration: Evidence from a Natural Experiment,” American Economic Review 85, 322-340*; donde se recopilan datos acerca de la compensación y duración de las lesiones laborales en un experimento natural en Michigan y Kentucky.
+
+En el dataframe se encuentran un total de 7150 observaciones y 30 variables. Así, la variable dependiente solicitada (***ldurat***) se trata de la transformación logarítmica de la variable ***durat***, que captura la duración (probablemente en días) de la prestación. Mientras que, otras variables relevantes serían: el coste médico total durante la prestación (***totmed***), el beneficio percibido de la prestación (***benefit***), la retribución semanal percibida en la semana anterior a la baja (***prewage***), o la variable dummy sobre la aplicación del incremento en el beneficio de la prestación (***afchnge***).
+
+A continuación se muestran una serie de estadísticos principales para aquellas variables cuantitativas. De esta manera, se puede observar que en el conjunto de datos se presenta una duración mínima de 0.25 de la prestación (probablemente sean 2 horas de jornada laboral de 8 horas) y un máximo de 182 días. La edad mínima registrada es de 12 años y una máxima de 98.
+
+En cuanto a los salarios previos semanales, existe una alta variabilidad desde 81.78 dólares a 1583.10 dólares, viéndose una distribución sesgada con cola hacia la derecha similar al caso de ***totmed*** y ***benefit***. Mientras que, destaca el máximo coste médico total de alrededor de 2 millones de dólares respecto al beneficio semanal máximo de la prestación de 742.22 dólares.
+
+```{r 1a}
+summary(select(df, durat, age, prewage, totmed, benefit))
+```
+
+A continuación se muestra un mapa de calor de las correlaciones entre las variables cuantitativas en el conjunto de datos de entrenamiento. En él destaca una correlación alta entre ***benefit*** y ***lprewage*** de 0.73, así como entre las correspondientes transformaciones logarítmicas como era de esperar.
+```{r 1b}
+# Filtramos por variables cuantitativas y calculamos la matriz de correlación:
+df_train_corr = select(df_train, prewage, lprewage, totmed, ltotmed, 
+                       age, lage, benefit)
+
+M_corr = corr.test(df_train_corr)$r
+
+# Graficamos el mapa de calor:
+ggcorrplot(round(M_corr, 2), lab = TRUE, lab_size = 2,
+           legend.title = "Correlación", lab_col = "black", 
+           colors = c("#4292C6", "white", "#FB9A99")) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 40, vjust = 1, hjust = 0.8)) +
+  labs(x = "", y = "", title = "Matriz de correlación")
+```
+
+Por otra parte, aplicamos el criterio del factor inflacionario de la varianza. Para ello, primero excluimos una variable dummy para las categorías mutuamente excluyentes para evitar la multicolinealidad perfecta: ***ky*** con ***mi***, ***injtype*** incluye todas las lesiones *[head, neck, upextr, trunk, lowback, lowextr, occdis]*, ***indust*** incluye *[manuf, construc]*; y con combinaciones lineales o transformaciones logarítmicas: ***afhigh***, ***highlpre***, ***prewage***, ***lage***, ***totmed*** (se han optado por las transformaciones logarítmicas o no en función de su VIF, aunque en el caso de ***totmed*** presentaba un VIF inferior a 5 pero por preferencia se ha mantenido únicamente ***ltotmed*** cuyo VIF era inferior).
+```{r 1c}
+# Aplicamos el criterio del factor inflacionario de la varianza para eliminar
+# aquellas variables que puedan presentar una elevada multicolinealidad. Para 
+# ello, eliminamos una dummy para categorías relacionadas y combinaciones 
+# lineales o transformaciones logarítmicas:
+df_train_VIF = select(df_train, -c("ky", 
+  "head", "neck", "upextr", "trunk", "lowback", "lowextr", "occdis",
+  "manuf", "construc",
+  "afhigh", "highlpre",
+  "prewage", "lage", "totmed",
+  "durat"))
+MVIF = lm(ldurat ~ ., df_train_VIF)
+# vif(MVIF)
+
+# Eliminamos injdes por tener uno de los mayores VIF:
+df_train_VIF = select(df_train_VIF, -c("injdes"))
+MVIF = lm(ldurat ~ ., df_train_VIF)
+# vif(MVIF)
+
+# Eliminamos lprewage por tener el VIF más elevado:
+df_train_VIF = select(df_train_VIF, -c("lprewage"))
+MVIF = lm(ldurat ~ ., df_train_VIF)
+
+# De este modo, ya no aparecen valores superiores a 5 en VIF.
+# vif(MVIF)
+
+# Podemos mirar el modelo derivado:
+# summary(MVIF)
+```
+De modo que, con el criterio aplicado, se eliminarían por presentar una elevada multicolinealidad las siguientes variables (con VIF superior a 5): ***injdes*** (menos manejable e interpretable que ***injtype***) y ***lprewage*** (muy correlacionada probablemente con ***highearn***). Por lo tanto, para escoger las variables explicativas y poder predecir ***ldurat*** podría ser razonable mantener las variables, cuyo coeficiente es individualmente significativo, derivadas del modelo que hemos empleado para el criterio del factor inflacionario de la varianza:
+
+- ***ltotmed***: el coste médico total determina la gravedad de la baja y por tanto su duración.
+- ***benefit***: un beneficio semanal más elevado puede incentivar una mayor duración de la prestación.
+- ***age***: la edad podría determinar la resiliencia o gravedad y por tanto la duración de la baja.
+- ***male***: el género puede ser una variable interesante a medir.
+- ***highearn***: se podría pensar que individuos con altos ingresos tienen un comportamiento distintivo en cuanto al beneficio de la prestación.
+- ***hosp***: la hospitalización determina en gran medida la duración de la baja.
+- ***indust***: el tipo de industria puede determinar la frecuencia y la duración de la baja, dado el entorno en el que se expone con mayor o menor riesgo.
+- ***injtype***: el tipo de baja determina en gran medida la duración de la misma.
+
+## (2)
+En este apartado, se muestran las interpretaciones (ceteris paribus) del modelo estimado, con la muestra de datos completa de *injury*. Cabe destacar que todos los coeficientes son individualmente significativos al 1% dado que todos los p-valor son menores al 0.01. Por otro lado, alrededor de un 32% de la varianza de ***ldurat*** es explicada por el modelo (R^2 ajustado), así como los coeficientes son conjuntamente significativos con el contraste F de significancia global. La siguiente fórmula es la empleada para interpretar las variables de tipo dummy a partir de sus coeficientes:
+```{r 2a}
+# Filtramos el df con las variables seleccionadas y ldurat:
+var_VIF = c("ldurat", "ltotmed", "benefit", "age", "male", "highearn",
+            "hosp", "indust", "injtype")
+
+# Filtramos en el conjunto de datos completo con las variables seleccionadas:
+df_2 = select(df, all_of(var_VIF))
+
+# Estimamos el modelo con el conjunto de datos completo:
+M2 = lm(ldurat ~ ., df_2)
+
+# Vemos los resultados:
+ summary(M2)
+```
+\[
+\Delta \% = \left( e^{\beta} - 1 \right) \times 100
+\]
+
+- ***ltotmed***: Un incremento del 1% en ***totmed*** conlleva, en promedio, a un incremento del 0.35% en la duración de la prestación (elasticidad).
+- ***benefit***: Un incremento en un dólar de ***benefit*** conlleva, en promedio, a un incremento del 0.28% en la duración de la prestación.
+- ***age***: Un año adicional de edad conlleva, en promedio, a un incremento del 0.77% en la duración de la prestación.
+- ***male***: La fórmula para interpretar variables dummy en un modelo log-lineal es la indicada anteriormente. Por lo que, ser hombre respecto a ser mujer implica, en promedio, una reducción del 13.22% en la duración de la prestación.
+- ***highearn***: Aplicando la fórmula anterior, los trabajadores con ingresos altos, en promedio, presentan una duración de la prestación menor en un 10.86% respecto a los ingresos bajos.
+- ***hosp***: Aplicando la fórmula anterior, las personas hospitalizadas, en promedio, presentan una duración de la prestación mayor en un 27.91% respecto a los no hospitalizados.
+- ***indust***: Cada coeficiente representa el efecto de vincularse a cada tipo de industria sobre la duración de la prestación respecto a la categoría base (industria manufacturera o sector primario). Viéndose que, la industria 2 (sector de transformación y, en especial, construcción) es la que incide en un mayor efecto en promedio sobre la duración respecto a la categoría base.
+- ***injtype***: Cada coeficiente representa el efecto de cada tipo de lesión sobre la duración de la prestación respecto a la categoría base (lesión de cabeza). Destacando la lesión 7 (enfermedad ocupacional) por tener un mayor efecto en cuanto a la duración en promedio de la prestación.
+
+```{r 2b, results='hide'}
+# Código para determinar que lesión corresponde a cada tipo:
+df %>%
+select(injtype, head, neck, upextr, trunk, lowback, lowextr, occdis) %>%
+group_by(injtype) %>%
+summarise(across(everything(), sum)) %>%
+arrange(injtype)
+# Lesión de tipo 8 no determinada, puede ser no lesión o baja por depresión u 
+# otras enfermedades mentales.
+```
+
+## (3)
+En este apartado, se estima el modelo con los mismos datos de *injury* completos como en el apartado (2), no obstante, teniendo en cuenta todas las variables explicativas (menos ***durat*** por coherencia; además el modelo automáticamente excluye aquellas variables que presentan multicolinealidad perfecta). De modo que, a continuación, se exponen los resultados comparativos. En ellos, se puede ver que el modelo 2 extrajo un mayor R^2 ajustado de 0.3211 frente al 0.3193 del modelo 3. En este caso, el mayor número de variables perjudica ligeramente al modelo 3 por la presencia probablemente de elevada multicolinealidad entre algunas variables (antes identificadas mediante VIF). En cuanto al RSE (Error estándar residual) en el modelo 3 es de 1.074 inferior al 1.078 del modelo 2, posiblemente por un sobreajuste a la muestra dado el mayor número de variables explicativas.
+```{r 3}
+# Preparamos el conjunto de datos del modelo sin la variable durat:
+df_3 = select(df, -durat)
+
+# Estimamos el modelo con el conjunto de datos completo y todas las 
+# variables explicativas:
+M3 = lm(ldurat ~ ., df_3)
+# summary(M3)
+
+# Identificamos las variables omitidas que presentan multicolinealidad 
+# perfecta:
+var_multi = c("mi", "head", "neck", "upextr", "trunk", "lowback", "lowextr",
+             "occdis", "manuf", "construc")
+ 
+# Identificamos las variables que no son significativas individualmente al 1%:
+var_M3_rest = c("afchnge", "highearn", "married", "injtype8", "age",
+                "prewage", "totmed", "injdes", "ky", "afhigh", "lprewage", "lage",
+                "highlpre", var_multi)
+
+# Omitimos las observaciones nulas que vamos a emplear en el modelo reducido:
+df_3 = df_3 %>% na.omit()
+
+# Creamos el dataframe con las variables de tipo dummy separadas:
+x = model.matrix(ldurat ~ ., 
+                 data = df_3)[,-1]
+y = df_3$ldurat
+
+df_3 = data.frame(x,
+                  ldurat = y)
+
+# Estimamos el modelo reducido sin las variables identificadas:
+M3_rest = lm(ldurat ~ ., select(df_3, -all_of(var_M3_rest)))
+# summary(M3_rest)
+ 
+
+# _____________________________________________________________________________
+# Contraste de significancia conjunta F:
+
+# Para calcular número de restricciones q:
+# length(var_M3_rest) - length(var_multi)
+
+# Para extraer los R^2:
+# summary(M3)$r.squared
+# summary(M3_rest)$r.squared
+ 
+# Para calcular el estadístico de contraste F:
+# ( (summary(M3)$r.squared - summary(M3_rest)$r.squared) / (length(var_M3_rest) -
+# length(var_multi)) ) / ( (1 - summary(M3)$r.squared) / 6796 )
+
+# Calculamos el valor crítico del contraste F de significancia conjunta:
+# qf(1 - 0.01, (length(var_M3_rest) - length(var_multi)), 6796)
+```
+Calculando el contraste F de significancia conjunta sobre las 13 variables no significativas individualmente al 1% obtenemos un valor del estadístico de 9.56. Mientras que, el valor crítico con 6796 grados de libertad y del 1% de significancia es de 2.13. Por lo que, se rechaza la hipótesis nula, implicando que al menos alguna de las 13 variables es significativa al 1%. De modo que, es posible que el correspondiente coeficiente se encuentre distorsionado en el modelo 3 completo, por la presencia de elevada multicolinealidad, pasando a ser no significativo individualmente.
+$$
+F = \frac{\left( 0.3218 - 0.3106 \right) / 13}
+         {\left( 1 - 0.3218 \right) / (6796)} = 8.63655
+$$
+
+## (4)
+```{r 4}
+# Preparamos el conjunto de entrenamiento sin la variable durat por coherencia:
+df_train_4 = select(df_train, -durat)
+
+# Estimamos el modelo con el conjunto de entrenamiento y todas las variables 
+# explicativas:
+M4 = lm(ldurat ~ ., df_train_4)
+
+# Calculamos las predicciones sobre el conjunto de prueba:
+M4_predict = predict(M4, newdata = df_prueba)
+
+# Calculamos el Error Cuadrático Medio (ECM) manualmente:
+# mean((df_prueba$ldurat - M4_predict)^2, na.rm = TRUE)
+
+# Calculamos la raíz del ECM:
+# sqrt(mean((df_prueba$ldurat - M4_predict)^2, na.rm = TRUE))
+
+# Valor medio de ldurat en los datos de entrenamiento:
+# mean(df_train_4$ldurat)
+# sd(df_train_4$ldurat)
+```
+Ajustando un modelo con todas las variables explicativas mediante el conjunto de entrenamiento, y posteriormente evaluando la predicción con el conjunto de prueba, da como resultado un ECM (Error Cuadrático Medio) de 11.92 y una raíz del ECM de 3.45. Siendo estos valores ciertamente elevados en comparación con el promedio de la variable ***ldurat*** de 1.33 en el conjunto de datos total de entrenamiento. Dichos resultados dan un indicio de efectos de elevada multicolinealidad y sobreajuste a los datos de entrenamiento (R^2 ajustado de 0.333) por el elevado número de explicativas.
+
+## (5)
+La Mejor Selección de Conjuntos consiste en un procedimiento mediante el cual se obtienen los mejores modelos o subconjuntos para cada número de variables posible, a través de la iteración de todas las combinaciones de variables. Por otro lado, la validación cruzada de 10-veces consiste en crear 10 particiones de la muestra, donde todas menos una se emplean para estimar el modelo, mientras que con la partición restante se calcula el ECM. Este proceso se aplica de manera iterativa para cada una de las 10 particiones, y sobre cada uno de los modelos resultantes de la Mejor Selección de Conjuntos.
+```{r 5a}
+# Primeramente preparamos los datos de la muestra excluyendo aquellas
+# variables que hemos visto que generan problemas de multicolinealidad 
+# perfecta, junto a durat por coherencia. Además, excluiremos aquellas que 
+# identificamos mediante el criterio del factor inflacionario de la varianza:
+df_train_5 = select(df, -all_of(c("ky", 
+  "head", "neck", "upextr", "trunk", "lowback", "lowextr", "occdis",
+  "manuf", "construc",
+  "afhigh", "highlpre",
+  "prewage", "lage", "totmed",
+  "durat",
+  "lprewage", "injdes"))) %>% na.omit()
+
+df_prueba_5 = select(df, -all_of(c("ky", 
+  "head", "neck", "upextr", "trunk", "lowback", "lowextr", "occdis",
+  "manuf", "construc",
+  "afhigh", "highlpre",
+  "prewage", "lage", "totmed",
+  "durat",
+  "lprewage", "injdes"))) %>% na.omit()
+
+# A continuación creamos una función que permita hacer predicciones con los
+# modelos de regsubsets() vista en clase:
+predict_regsubsets=function(object,newdata,id,...){
+  form=as.formula(object$call[[2]])
+  mat=model.matrix(form,newdata)
+  coefi=coef(object,id=id)
+  xvars=names(coefi)
+  mat[,xvars]%*%coefi
+}
+
+# _____________________________________________________________________________
+# Este apartado es destinado a aplicar la validación cruzada 10-veces al método 
+# de la Mejor Selección de Conjuntos:
+
+# Para ello primero definimos la semilla:
+set.seed(641)
+
+# El número de variables explicativas en los datos:
+v = ncol(df_train_5) - 1
+
+# El número de k-fold o veces de validación cruzada a aplicar:
+k = 10
+
+# Con ello, primero creamos las k particiones de manera aleatoria:
+k_id = sample(1:k,
+              nrow(df_train_5),
+              replace = TRUE)
+
+# Creamos la matriz donde se irán almacenando los ECM para cada modelo y 
+# k-fold:
+M_ECM_5 = matrix(NA,
+                 k,
+                 v,
+                 dimnames = list(NULL, paste(1:v)))
+
+# Aplicamos un bucle para iterar sobre cada k-fold de la validación cruzada:
+for (i in 1:k){
+  # Entrenamos los modelos con 1-k particiones: 
+  M5 = regsubsets(ldurat ~ .,
+                  df_train_5[k_id != i,],
+                  nvmax = v)
+ 
+  # Aplicamos un bucle para iterar sobre cada modelo de la Mejor Selección de
+  # Conjuntos:
+  for (j in 1:v){
+    M5_predict = predict_regsubsets(M5,
+                                    df_train_5[k_id == i,],
+                                    id = j)
+    
+    # Estimamos el error de prueba con la partición k de datos para el modelo 
+    # j y lo almacenamos:
+    M_ECM_5[i,j] = mean( (df_train_5$ldurat[k_id == i] - M5_predict)^2 )
+  }
+}
+# _____________________________________________________________________________
+# Una vez calculados todos los ECM para cada modelo de la Mejor Selección de
+# Conjuntos y para cada partición k de la validación cruzada, estimamos el
+# error de prueba dentro del conjunto de entrenamiento para cada modelo:
+ECM_5 = apply(M_ECM_5, 2, mean)
+
+# Guardamos como otra variable para el apartado (8):
+ECM_10CV_5 = ECM_5
+
+# Localizamos el ECM mínimo:
+ECM_5_min = which.min(ECM_5)
+
+# Comprobamos la regla del codo, para ello primero calculamos la desviación
+# estándar de los errores de prueba estimados y comprobamos si el modelo
+# inmediatamente anterior se encuentra dentro del rango:
+i = 1
+while (ECM_5[ECM_5_min - i] <= min(ECM_5) + sd(ECM_5)) {
+  i = i + 1
+}
+
+# Entonces el i óptimo es:
+i = i - 1
+
+# El número de variables óptimas es:
+M5_nv_opt = ECM_5_min - i
+
+# Error de prueba estimado mediante VC del modelo óptimo:
+M5_ECM = ECM_5[ECM_5_min - i]
+
+# Estimamos los modelos con todo el conjunto de entrenamiento:
+M5 = regsubsets(ldurat ~ .,
+                df_train_5,
+                nvmax = v)
+
+# Obtenemos los coeficientes del modelo óptimo:
+M5_explicativas = names(coef(M5, id = (ECM_5_min - i)))[-1]
+
+M5_explicativas = as.formula(paste("ldurat ~", paste(M5_explicativas, 
+                                                     collapse = " + ")))
+# Estimamos el modelo óptimo:
+M5_opt = lm(M5_explicativas,
+            df_train_5)
+
+# Mostramos los resultados del modelo:
+# summary(M5_opt)
+
+# R^2 ajustado del modelo óptimo con datos completos:
+# summary(M5_opt)$adj.r.squared
+
+# Calculamos las predicciones en el conjunto de prueba:
+M5_predict = predict(M5_opt,
+                     newdata = df_prueba_5)
+
+# Calculamos el error de prueba:
+M5_error = mean( (df_prueba_5$ldurat - M5_predict)^2 )
+```
+
+```{r 5b}
+# Creamos un dataframe para graficar los ECM resultantes:
+data = data.frame(
+  Variables = 1:length(ECM_5),  # Índices de las variables explicativas
+  ECM = ECM_5                   # Valores promedio del ECM
+)
+
+# Calculamos los puntos clave:
+ECM_5_min = which.min(ECM_5)               
+ECM_5_sd = sd(ECM_5)                       
+codo_index = min(which(ECM_5 <= ECM_5[ECM_5_min] + ECM_5_sd))
+
+# Añadimos una columna para resaltar los puntos clave:
+data$Highlight = "Normal"
+data$Highlight[ECM_5_min] = "Mínimo ECM"
+data$Highlight[codo_index] = "Regla del Codo"
+
+# Graficamos con ggplot2:
+ggplot(data, aes(x = Variables, y = ECM)) +
+  geom_line(color = "black") +  # Línea que conecta los puntos
+  geom_point(aes(color = Highlight), size = 3) +  # Puntos diferenciados por tipo
+  scale_color_manual(values = c("Normal" = "black", 
+                                "Mínimo ECM" = "blue", 
+                                "Regla del Codo" = "red")) +
+  labs(
+    title = "ECM de la Mejor Selección de Conjuntos con VC 10-veces",
+    x = "Número de variables explicativas",
+    y = "Error Cuadrático Medio (ECM)",
+    color = "Puntos destacados:"
+  ) +
+  theme_minimal() +  # Tema minimalista
+  theme(legend.position = "top")  # Posición de la leyenda
+```
+Así, en la gráfica anterior vemos que, pese a que el ECM mínimo se obtiene con el modelo que tiene 10 de variables; mediante la regla del codo basado en el criterio de parsimonia, se obtiene como modelo óptimo aquel que tiene 4 variables explicativas. Concretamente, con el modelo óptimo resultante se estima un error de prueba de 1.18. Por otro lado, estimando el modelo óptimo en el conjunto de entrenamiento hemos obtenido un R^2 ajustado de 0.30.
+
+## (6)
+```{r 6a}
+# Emplearemos el mismo conjunto de datos df_train_5 y df_prueba_5.
+
+# _____________________________________________________________________________
+# Este apartado es destinado a aplicar la validación cruzada 10-veces al método 
+# de la Selección por Pasos Hacia Adelante:
+
+# Para ello primero definimos la semilla:
+set.seed(641)
+
+# El número de variables explicativas en los datos:
+v = ncol(df_train_5) - 1
+
+# El número de k-fold o veces de validación cruzada a aplicar:
+k = 10
+
+# Con ello, primero creamos las k particiones de manera aleatoria:
+k_id = sample(1:k,
+              nrow(df_train_5),
+              replace = TRUE)
+
+# Creamos la matriz donde se irán almacenando los ECM para cada modelo y 
+# k-fold:
+M_ECM_6 = matrix(NA,
+                 k,
+                 v,
+                 dimnames = list(NULL, paste(1:v)))
+
+# Aplicamos un bucle para iterar sobre cada k-fold de la validación cruzada:
+for (i in 1:k){
+  # Entrenamos los modelos con 1-k particiones: 
+  M6 = regsubsets(ldurat ~ .,
+                  df_train_5[k_id != i,],
+                  nvmax = v,
+                  method = "forward")
+ 
+  # Aplicamos un bucle para iterar sobre cada modelo de la Mejor Selección de
+  # Conjuntos:
+  for (j in 1:v){
+    M6_predict = predict_regsubsets(M6,
+                                    df_train_5[k_id == i,],
+                                    id = j)
+    
+    # Estimamos el error de prueba con la partición k de datos para el modelo 
+    # j y lo almacenamos:
+    M_ECM_6[i,j] = mean( (df_train_5$ldurat[k_id == i] - M6_predict)^2 )
+  }
+}
+# _____________________________________________________________________________
+# Una vez calculados todos los ECM para cada modelo de la Selección por Pasos
+# Hacia Adelante y para cada partición k de la validación cruzada, estimamos el
+# error de prueba para cada modelo:
+ECM_6 = apply(M_ECM_6, 2, mean)
+
+# Guardamos como otra variable para el apartado (8):
+ECM_10CV_6 = ECM_6
+
+# Localizamos el ECM mínimo:
+ECM_6_min = which.min(ECM_6)
+
+# Comprobamos la regla del codo, para ello primero calculamos la desviación
+# estándar de los errores de prueba estimados y comprobamos si el modelo
+# inmediatamente anterior se encuentra dentro del rango:
+i = 1
+while (ECM_6[ECM_6_min - i] < min(ECM_6) + sd(ECM_6)) {
+  i = i + 1
+}
+
+# Entonces el i óptimo es:
+i = i - 1
+
+# El número de variables óptimas es:
+M6_nv_opt = ECM_6_min - i
+
+# Error de prueba estimado mediante VC del modelo óptimo:
+M6_ECM = ECM_6[ECM_6_min - i]
+
+# Estimamos los modelos con todo el conjunto de entrenamiento:
+M6 = regsubsets(ldurat ~ .,
+                df_train_5,
+                nvmax = v,
+                method = "forward")
+
+# Obtenemos los coeficientes del modelo óptimo:
+M6_explicativas = names(coef(M6, id = (ECM_6_min - i)))[-1]
+
+M6_explicativas = as.formula(paste("ldurat ~", paste(M6_explicativas, 
+                                                     collapse = " + ")))
+# Estimamos el modelo óptimo:
+M6_opt = lm(M6_explicativas,
+            df_train_5)
+
+# Mostramos los resultados del modelo:
+# summary(M6_opt)
+
+# R^2 ajustado del modelo óptimo con datos completos:
+# summary(M6_opt)$adj.r.squared
+
+# Calculamos las predicciones en el conjunto de prueba:
+M6_predict = predict(M6_opt,
+                     newdata = df_prueba_5)
+
+# Calculamos el error de prueba:
+M6_error = mean( (df_prueba_5$ldurat - M6_predict)^2 )
+```
+
+```{r 6b}
+# Creamos un dataframe para graficar los ECM resultantes:
+data = data.frame(
+  Variables = 1:length(ECM_6),  # Índices de las variables explicativas
+  ECM = ECM_6                   # Valores promedio del ECM
+)
+
+# Calculamos los puntos clave:
+ECM_6_min = which.min(ECM_6)               
+ECM_6_sd = sd(ECM_6)                       
+codo_index = min(which(ECM_6 <= ECM_6[ECM_6_min] + ECM_6_sd))
+
+# Añadimos una columna para resaltar los puntos clave:
+data$Highlight = "Normal"
+data$Highlight[ECM_6_min] = "Mínimo ECM"
+data$Highlight[codo_index] = "Regla del Codo"
+
+# Graficamos con ggplot2:
+ggplot(data, aes(x = Variables, y = ECM)) +
+  geom_line(color = "black") +  # Línea que conecta los puntos
+  geom_point(aes(color = Highlight), size = 3) +  # Puntos diferenciados por tipo
+  scale_color_manual(values = c("Normal" = "black", 
+                                "Mínimo ECM" = "blue", 
+                                "Regla del Codo" = "red")) +
+  labs(
+    title = "ECM de la Selección por Pasos Hacia Adelante con VC 10-veces",
+    x = "Número de variables explicativas",
+    y = "Error Cuadrático Medio (ECM)",
+    color = "Puntos destacados:"
+  ) +
+  theme_minimal() +  # Tema minimalista
+  theme(legend.position = "top")  # Posición de la leyenda
+```
+En la gráfica anterior, podemos ver que el modelo resultante del método de la Selección por Pasos Hacia Adelante con el ECM mínimo, de nuevo es el modelo con 10 variables. Asimismo, aplicando la regla del codo, el modelo con 4 variables sería el óptimo manteniendo un buen compromiso entre ECM mínimo y parsimonia. Por lo que su R^2 ajustado es de 0.30 en el conjunto de entrenamiento y el error de prueba estimado de 1.18, siendo el mismo modelo con los mismos coeficientes al del apartado anterior.
+
+## (7)
+```{r 7a}
+# _____________________________________________________________________________
+# Este apartado es destinado a aplicar la validación cruzada 5-veces al método 
+# de la Mejor Selección de Conjuntos:
+
+# Para ello primero definimos la semilla:
+set.seed(641)
+
+# El número de variables explicativas en los datos:
+v = ncol(df_train_5) - 1
+
+# El número de k-fold o veces de validación cruzada a aplicar:
+k = 5
+
+# Con ello, primero creamos las k particiones de manera aleatoria:
+k_id = sample(1:k,
+              nrow(df_train_5),
+              replace = TRUE)
+
+# Creamos la matriz donde se irán almacenando los ECM para cada modelo y 
+# k-fold:
+M_ECM_5 = matrix(NA,
+                 k,
+                 v,
+                 dimnames = list(NULL, paste(1:v)))
+
+# Aplicamos un bucle para iterar sobre cada k-fold de la validación cruzada:
+for (i in 1:k){
+  # Entrenamos los modelos con 1-k particiones: 
+  M5 = regsubsets(ldurat ~ .,
+                  df_train_5[k_id != i,],
+                  nvmax = v)
+ 
+  # Aplicamos un bucle para iterar sobre cada modelo de la Mejor Selección de
+  # Conjuntos:
+  for (j in 1:v){
+    M5_predict = predict_regsubsets(M5,
+                                    df_train_5[k_id == i,],
+                                    id = j)
+    
+    # Estimamos el error de prueba con la partición k de datos para el modelo 
+    # j y lo almacenamos:
+    M_ECM_5[i,j] = mean( (df_train_5$ldurat[k_id == i] - M5_predict)^2 )
+  }
+}
+# _____________________________________________________________________________
+# Una vez calculados todos los ECM para cada modelo de la Mejor Selección de
+# Conjuntos y para cada partición k de la validación cruzada, estimamos el
+# error de prueba para cada modelo:
+ECM_5 = apply(M_ECM_5, 2, mean)
+
+# Guardamos como otra variable para el apartado (8):
+ECM_5CV_5 = ECM_5
+
+# Localizamos el ECM mínimo:
+ECM_5_min = which.min(ECM_5)
+
+# Comprobamos la regla del codo, para ello primero calculamos la desviación
+# estándar de los errores de prueba estimados y comprobamos si el modelo
+# inmediatamente anterior se encuentra dentro del rango:
+i = 1
+while (ECM_5[ECM_5_min - i] < min(ECM_5) + sd(ECM_5)) {
+  i = i + 1
+}
+
+# Entonces el i óptimo es:
+i = i - 1
+
+# Error de prueba estimado mediante VC del modelo óptimo:
+M5_ECM = ECM_5[ECM_5_min - i]
+
+# Estimamos los modelos con toda la muestra:
+M5 = regsubsets(ldurat ~ .,
+                df_train_5,
+                nvmax = v)
+
+# Obtenemos los coeficientes del modelo óptimo:
+M5_explicativas = names(coef(M5, id = (ECM_5_min - i)))[-1]
+
+M5_explicativas = as.formula(paste("ldurat ~", paste(M5_explicativas, 
+                                                     collapse = " + ")))
+# Estimamos el modelo óptimo:
+M5_opt = lm(M5_explicativas,
+            df_train_5)
+
+# Mostramos los resultados del modelo:
+# summary(M5_opt)
+
+# R^2 ajustado del modelo óptimo con datos completos:
+# summary(M5_opt)$adj.r.squared
+
+# Calculamos las predicciones en el conjunto de prueba:
+M5_predict = predict(M5_opt,
+                     newdata = df_prueba_5)
+
+# Calculamos el error de prueba:
+M5_error_CV5 = mean( (df_prueba_5$ldurat - M5_predict)^2 )
+```
+
+```{r 7b}
+# _____________________________________________________________________________
+# Este apartado es destinado a aplicar la validación cruzada 5-veces al método 
+# de la Selección por Pasos Hacia Adelante:
+
+# Para ello primero definimos la semilla:
+set.seed(641)
+
+# El número de variables explicativas en los datos:
+v = ncol(df_train_5) - 1
+
+# El número de k-fold o veces de validación cruzada a aplicar:
+k = 5
+
+# Con ello, primero creamos las k particiones de manera aleatoria:
+k_id = sample(1:k,
+              nrow(df_train_5),
+              replace = TRUE)
+
+# Creamos la matriz donde se irán almacenando los ECM para cada modelo y 
+# k-fold:
+M_ECM_6 = matrix(NA,
+                 k,
+                 v,
+                 dimnames = list(NULL, paste(1:v)))
+
+# Aplicamos un bucle para iterar sobre cada k-fold de la validación cruzada:
+for (i in 1:k){
+  # Entrenamos los modelos con 1-k particiones: 
+  M6 = regsubsets(ldurat ~ .,
+                  df_train_5[k_id != i,],
+                  nvmax = v,
+                  method = "forward")
+ 
+  # Aplicamos un bucle para iterar sobre cada modelo de la Mejor Selección de
+  # Conjuntos:
+  for (j in 1:v){
+    M6_predict = predict_regsubsets(M6,
+                                    df_train_5[k_id == i,],
+                                    id = j)
+    
+    # Estimamos el error de prueba con la partición k de datos para el modelo 
+    # j y lo almacenamos:
+    M_ECM_6[i,j] = mean( (df_train_5$ldurat[k_id == i] - M6_predict)^2 )
+  }
+}
+# _____________________________________________________________________________
+# Una vez calculados todos los ECM para cada modelo de la Selección por Pasos
+# Hacia Adelante y para cada partición k de la validación cruzada, estimamos el
+# error de prueba para cada modelo:
+ECM_6 = apply(M_ECM_6, 2, mean)
+
+# Guardamos como otra variable para el apartado (8):
+ECM_5CV_6 = ECM_6
+
+# Localizamos el ECM mínimo:
+ECM_6_min = which.min(ECM_6)
+
+# Comprobamos la regla del codo, para ello primero calculamos la desviación
+# estándar de los errores de prueba estimados y comprobamos si el modelo
+# inmediatamente anterior se encuentra dentro del rango:
+i = 1
+while (ECM_6[ECM_6_min - i] < min(ECM_6) + sd(ECM_6)) {
+  i = i + 1
+}
+
+# Entonces el i óptimo es:
+i = i - 1
+
+# Error de prueba estimado mediante VC del modelo óptimo:
+M6_ECM = ECM_6[ECM_6_min - i]
+
+# Estimamos los modelos con toda la muestra:
+M6 = regsubsets(ldurat ~ .,
+                df_train_5,
+                nvmax = v,
+                method = "forward")
+
+# Obtenemos los coeficientes del modelo óptimo:
+M6_explicativas = names(coef(M6, id = (ECM_6_min - i)))[-1]
+
+M6_explicativas = as.formula(paste("ldurat ~", paste(M6_explicativas, 
+                                                     collapse = " + ")))
+# Estimamos el modelo óptimo:
+M6_opt = lm(M6_explicativas,
+            df_train_5)
+
+# Mostramos los resultados del modelo:
+ summary(M6_opt)
+
+# R^2 ajustado del modelo óptimo con datos completos:
+# summary(M6_opt)$adj.r.squared
+
+# Calculamos las predicciones en el conjunto de prueba:
+M6_predict = predict(M6_opt,
+                     newdata = df_prueba_5)
+
+# Calculamos el error de prueba:
+M6_error_CV5 = mean( (df_prueba_5$ldurat - M6_predict)^2 )
+```
+Aplicando la validación cruzada 5-veces no presenta diferencias en cuanto a los modelos óptimos extraídos respecto a la validación cruzada 10-veces, siendo incluso computacionalmente más barato. De modo que en ambos métodos se obtiene, de nuevo, el mismo modelo con idénticos coeficientes, aplicando el criterio del codo. No obstante, vemos que el ECM mínimo para ambos métodos con VC 5-veces, se presenta en el modelo con 9 variables, mientras que, en la VC 10-veces era el correspondiente al modelo con 10 variables.
+
+## (8)
+```{r 8}
+# Para ello creamos un dataframe donde cada columna representa un método 
+# distinto aplicado para estimar los modelos:
+df_results_8 = data.frame(VC5_Mejor_Selección = ECM_5CV_5,
+                          VC10_Mejor_Selección = ECM_10CV_5,
+                          VC5_Hacia_Adelante = ECM_5CV_6,
+                          VC10_Hacia_Adelante = ECM_10CV_6)
+
+# df_results_8[,1] <= df_results_8[,3]
+# df_results_8[,2] <= df_results_8[,4]
+
+
+df_results_8b = data.frame(Mejor_Selección = c(M5_error_CV5 , M5_error),
+                           Hacia_Adelante = c(M6_error_CV5 , M6_error),
+                           row.names = c("VC_5-veces", "VC_10-veces"))
+
+df_results_8b
+```
+Así, en la tabla anterior vemos que en todos los métodos empleados, cuantas más variables introducimos al modelo menor es el error de prueba estimado, hasta alcanzar un punto, modelos de 9 o 10 variables, donde se estabiliza o incluso aumenta el ECM ligeramente. Siendo el modelo con 10 variables el modelo con el ECM mínimo para VC 10-veces. Por otro lado, vemos que las diferencias de aplicar validación cruzada 5-veces y 10-veces son poco significativas en este caso para cada método, viéndose en algunos modelos ligeramente con mayor o menor error de prueba. Diferencias probablemente inherentes a la aleatoriedad de la muestra de entrenamiento empleada.
+
+En cuanto a las diferencias entre el método de la Mejor Selección de Conjuntos y la Selección por Pasos Hacia Adelante, esperablemente los errores de prueba son similares, dado que los modelos estimados tienden a converger entre ambos métodos con cantidades moderadas de variables explicativas.
+
+Así, en la tabla anterior podemos ver que ambos métodos, independientemente de la validación cruzada empleada de 5-veces o 10-veces, aplicando la regla del codo se seleccionan el mismo modelo, cuyo resultado se expone a continuación. Este hecho ocurre dado que, para una cantidad moderada-baja de variables explicativas posibles (11 en este caso), ambos métodos convergen a una misma selección óptima. Cabe destacar que ambos métodos se ven afectados de manera negativa por la introducción de variables con elevada multicolinealidad. Por ello, respecto a las 28 variables que incluye la base de datos original (sin contar ***durat***), tras aplicar el criterio del factor inflacionario de la varianza, las variables disponibles se reducen a 11.
+
+## (9)
+Teniendo en cuenta las tablas del apartado anterior, ambos métodos coinciden con el modelo empleado, independientemente de la validación cruzada de 5-veces o 10-veces. De modo que, en los resultados expuestos anteriormente, se observa que todos los coeficientes son significativos al 1%, dado que los correspondientes p-valor son claramente inferiores al 0.01.
+
+Si tenemos en cuenta la tabla del apartado anterior con todos los modelos de cada método, vemos que, el modelo con 10 variables coincide en ser el que presenta un menor error de prueba estimado para ambos métodos de selección de modelos en validación cruzada 10-veces. Por lo que los modelos coinciden para ambos métodos. Más específicamente, el modelo presenta un eror de prueba estimado de 1.17 y un R^2 ajustado de 0.32, superior a los modelos anteriormente escogidos mediante la regla del codo, cuyos valores eran de 0.30 para ambos.
+```{r 9}
+# Estimamos el modelo óptimo con las 10 variables explicativas y el conjunto
+# de datos completo:
+# Estimamos los modelos con toda la muestra:
+M9 = regsubsets(ldurat ~ .,
+                df_train_5,
+                nvmax = v)
+
+M9_explicativas = names(coef(M9, id = 10))[-1]
+
+# Creamos el dataframe con las variables de tipo dummy específicas creadas:
+df_train_9 = model.matrix(ldurat ~ .,
+                          df_train_5)[, -1]
+
+# Filtramos por las variables explicativas óptimas:
+df_train_9 = cbind(ldurat = df_train_5$ldurat, df_train_9[, M9_explicativas])
+
+# Estimamos el modelo óptimo:
+M9 = lm(ldurat ~ .,
+        as.data.frame(df_train_9))
+
+# Mostramos los resultados:
+summary(M9)
+```
+Observando la tabla, vemos que todas las variables incluidas en el modelo son significativas de manera individual y global al 1% mediante el p-valor del contraste individual t y el p-valor del contraste F global, a excepción de la variable ***injtype2*** que es individualmente significativa al 0.05.
+
+## (10)
+La regresión Ridge consiste en una regresión lineal con la característica de añadir una penalización al tamaño de los coeficientes, ideal para afrontar el problema de multicolinealidad elevada. Por tanto, a la hora de escoger los datos de entrenamiento, no será necesario eliminar aquellas variables que presentaban un VIF superior a 5 en el apartado (1), pero sí se deberán excluir aquellas que pueden ocasionar multicolinealidad perfecta. Además, se han omitido las variables de ***durat*** y ***injdes***, esta última por ser un código categórico de 4 dígitos correspondiente a la descripción de la lesión, difícilmente manejable en modelos de regresión. 
+
+Por otro lado, tanto el modelo de regresión Ridge como LASSO pueden verse afectados negativamente cuando se introducen variables con valores de rangos diversos. Por lo que, será conveniente escalar los valores a media 0 y desviación típica 1. Así, habiendo escalado aquellas variables cuantitativas del conjunto de datos, se estima una regresión Ridge en el conjunto de entrenamiento, resultando en un error de prueba sobre el conjunto de prueba de 1.21. En la gráfica concretamente se puede encontrar la línea discontinua sobre el valor de lambda óptimo de 0.30, cuyo logaritmo es de -1.20 representado en la gráfica.
+```{r 10}
+# Preparamos los datos de entrenamiento a emplear, excluyendo las variables
+# que ocasionan multicolinealidad perfecta:
+df_train_10 = select(df_train, -all_of(c("durat", "injdes", var_multi))) %>%
+              na.omit() %>%
+              mutate(across(c("age", "prewage", "totmed", "benefit", 
+                              "lprewage", "lage", "ltotmed", "highlpre"), 
+                            scale))
+
+# Preparamos los datos en la disposición correcta para estimar la regresión 
+# Ridge:
+x = model.matrix(ldurat ~ ., df_train_10)[, -1]
+y = df_train_10$ldurat
+
+# Establecemos la semilla para la validación cruzada:
+set.seed(641)
+
+# Mediante validación cruzada 10-veces estimamos el mejor lambda de la
+# regresión de Ridge:
+M10_cv = cv.glmnet(x,
+                   y,
+                   alpha = 0,
+                   nfolds = 10)
+plot(M10_cv)
+# Obtenemos el lamda óptimo con la regla del codo:
+M10_lambda_opt = M10_cv$lambda.1se
+# log(M10_lambda_opt)
+
+# Estimamos el modelo Ridge con el lambda óptimo:
+M10 = glmnet(x, 
+             y, 
+             alpha = 0, 
+             lambda = M10_lambda_opt)
+
+# Preparamos los datos de prueba:
+df_prueba_10 = select(df_prueba, -all_of(c("durat", "injdes", var_multi))) %>%
+               na.omit() %>%
+               mutate(across(c("age", "prewage", "totmed", "benefit", 
+                               "lprewage", "lage", "ltotmed", "highlpre"), 
+                             scale))
+x_prueba = model.matrix(ldurat ~ ., df_prueba_10)[, -1]
+y_prueba = df_prueba_10$ldurat
+
+# Realizamos las predicciones sobre el conjunto de prueba:
+M10_predict = predict(M10_cv,
+                      s = "lambda.1se",
+                      newx = x_prueba)
+
+# Calculamos el ECM del conjunto de prueba:
+M10_ECM = mean( (y_prueba - M10_predict)^2 )
+```
+
+## (11)
+La regresión LASSO es similar a la regresión Ridge, ambas caracterizadas por añadir una penalización al tamaño de los coeficientes, pero en el caso de LASSO se aplica una selección de variables, es decir, algunos coeficientes pueden obtener un valor nulo, ideal para situaciones con muchas variables explicativas de las que se esperan que haya alguna irrelevante.
+
+Por lo que, en la gráfica presentada a continuación, vemos que mediante la aplicación de la validación cruzada en la regresión LASSO, se obtiene un lambda óptimo de 0.02 inferior al obtenido con la regresión Ridge. Viéndose representado con una línea discontinua su logaritmo con un valor de -3.92. Obteniendo un error de prueba de 1.187.
+
+En cuanto a los coeficientes, en la siguiente tabla se pueden ver las que se han omitido mediante un coeficiente nulo. Así, el número de coeficientes distintos de 0 es de 13, contando el intercepto. En otras palabras, se considera el efecto de 12 variables explicativas en el modelo LASSO estimado.
+```{r 11}
+# Emplearemos el mismo conjunto de datos de df_train_10 y df_prueba_10.
+
+# Establecemos la semilla para la validación cruzada:
+set.seed(641)
+
+# Mediante validación cruzada 10-veces estimamos el mejor lambda de la
+# regresión de LASSO:
+M11_cv = cv.glmnet(x,
+                   y,
+                   alpha = 1,
+                   nfolds = 10)
+plot(M11_cv)
+# Obtenemos el lamda óptimo:
+M11_lambda_opt = M11_cv$lambda.1se
+# log(M11_lambda_opt)
+
+# Estimamos el modelo LASSO con el lambda óptimo:
+M11 = glmnet(x, 
+             y, 
+             alpha = 1, 
+             lambda = M11_lambda_opt)
+
+# Realizamos las predicciones sobre el conjunto de prueba:
+M11_predict = predict(M11_cv,
+                      s = "lambda.1se",
+                      newx = x_prueba)
+
+# Calculamos el ECM del conjunto de prueba:
+M11_ECM = mean( (y_prueba - M11_predict)^2 )
+
+# Analizamos los coeficientes estimados por la regresión LASSO:
+M11_coef = predict(M11_cv,
+                   s = "lambda.1se",
+                   type = "coefficients")[1:25,]
+
+M11_coef
+```
+
+## (12)
+En este apartado, se estiman de nuevo los modelos de Ridge y LASSO con la diferencia de emplear validación cruzada 5-veces para hallar el lambda óptimo, siempre aplicando la regla del codo. Las diferencias producidas en cuanto a la regresión Ridge se centran en un aumento ligero del lambda escogido de 0.36 y del error de prueba calculado de 1.212, respecto al lambda de 0.30 seleccionado con validación cruzada 10-veces y el correspondiente error de prueba de 1.206.
+
+Mientras que, respecto a la regresión LASSO, se obtiene un lambda óptimo de 0.03 ligeramente superior al 0.02 obtenido con validación cruzada 10-veces. Así como, el error de prueba para validación cruzada 5-veces es de 1.192 muy similar al 1.187 de 10-veces. En cuanto al número de coeficientes distintos de 0 es de 11, contando el intercepto. En otras palabras, se considera el efecto de 10 variables explicativas en el modelo LASSO estimado.
+```{r 12a}
+# Emplearemos el mismo conjunto de datos de df_train_10 y df_prueba_10.
+
+# Establecemos la semilla para la validación cruzada:
+set.seed(641)
+
+# Mediante validación cruzada 5-veces estimamos el mejor lambda de la
+# regresión de Ridge:
+M12a_cv = cv.glmnet(x,
+                    y,
+                    alpha = 0,
+                    nfolds = 5)
+plot(M12a_cv)
+# Obtenemos el lamda óptimo:
+M12a_lambda_opt = M12a_cv$lambda.1se
+# log10(M12a_lambda_opt)
+
+# Estimamos el modelo Ridge con el lambda óptimo:
+M12a = glmnet(x, 
+              y, 
+              alpha = 0, 
+              lambda = M12a_lambda_opt)
+
+# Realizamos las predicciones sobre el conjunto de prueba:
+M12a_predict = predict(M12a_cv,
+                       s = "lambda.1se",
+                       newx = x_prueba)
+
+# Calculamos el ECM del conjunto de prueba:
+M12a_ECM = mean( (y_prueba - M12a_predict)^2 )
+
+# Analizamos los coeficientes estimados por la regresión LASSO:
+M12a_coef = predict(M12a_cv,
+                    s = "lambda.1se",
+                    type = "coefficients")[1:25,]
+
+M12a_coef
+```
+
+```{r 12b}
+# Emplearemos el mismo conjunto de datos de df_train_10 y df_prueba_10.
+
+# Establecemos la semilla para la validación cruzada:
+set.seed(641)
+
+# Mediante validación cruzada 5-veces estimamos el mejor lambda de la
+# regresión de Ridge:
+M12b_cv = cv.glmnet(x,
+                    y,
+                    alpha = 1,
+                    nfolds = 5)
+plot(M12b_cv)
+# Obtenemos el lamda óptimo:
+M12b_lambda_opt = M12b_cv$lambda.1se
+# log10(M12b_lambda_opt)
+
+# Estimamos el modelo Ridge con el lambda óptimo:
+M12b = glmnet(x, 
+              y, 
+              alpha = 1, 
+              lambda = M12b_lambda_opt)
+
+# Realizamos las predicciones sobre el conjunto de prueba:
+M12b_predict = predict(M12b_cv,
+                       s = "lambda.1se",
+                       newx = x_prueba)
+
+# Calculamos el ECM del conjunto de prueba:
+M12b_ECM = mean( (y_prueba - M12b_predict)^2 )
+
+# Analizamos los coeficientes estimados por la regresión LASSO:
+M12b_coef = predict(M12b_cv,
+                    s = "lambda.1se",
+                    type = "coefficients")[1:25,]
+
+M12b_coef
+```
+
+## (13)
+El modelo de Componentes Principales consiste en un método que integra el Análisis de Componentes Principales en la regresión lineal clásica. Así, el ACP resulta ideal para reducir la dimensionalidad de variables cuantitativas altamente correlacionadas, eliminando el problema de incluirlas por separado y tener que tratar con los efectos sobre los coeficientes de la multicolinealidad elevada. De modo que, el modelo de Componentes Principales también se puede integrar con la validación cruzada y el método correspondiente del codo, a la hora de seleccionar el número óptimo M de componentes principales a incluir en la regresión lineal.
+
+Por lo que, en este apartado se aplica tanto la validación cruzada 5-veces como 10-veces para elegir el M óptimo. De esta manera, ambos casos resultan en la elección del mismo M óptimo con la regla del codo, siendo 18 componentes principales incluidos en la regresión lineal derivada del modelo. En otras palabras, se incluyen aquellos que explican una proporción significativa de la varianza entre las variables explicativas. Respecto al error de prueba que se obtiene es de 1.18, tratándose ambos del mismo modelo.
+```{r 13}
+# Establecemos la semilla:
+set.seed(641)
+
+# Preparamos los datos de entrenamiento y de prueba:
+df_train_13 = df_train_10
+
+df_prueba_13 = df_prueba_10
+
+# Convertimos variables categóricas a tipo dummy en los datos de entrenamiento:
+x = model.matrix(ldurat ~ ., df_train_13)[, -1]
+y = df_train_13$ldurat
+
+df_train_13 = data.frame(x, ldurat = y)
+
+# Convertimos variables categóricas a tipo dummy en el conjunto de prueba:
+x_prueba = model.matrix(ldurat ~ ., df_prueba_13)[, -1]
+y_prueba = df_prueba_13$ldurat
+
+df_prueba_13 = data.frame(x_prueba, ldurat = y_prueba)
+
+# Estimamos el modelo con el conjunto de entrenamiento:
+M13 = pcr(ldurat ~ .,
+          data = df_train_13,
+          scale = TRUE,
+          validation = "CV")
+
+# Mostramos los resultados:
+# summary(M13)
+
+# Aplicamos la validación cruzada 10-veces y 5-veces:
+M13_CV10 = crossval(M13, segments = 10)
+M13_CV5 = crossval(M13, segments = 5)
+
+# Graficamos los ECM calculados mediante VC en el conjunto de entrenamiento:
+# plot(RMSEP(M13_CV10), legendpos="topright")
+# plot(RMSEP(M13_CV5), legendpos="topright")
+
+# Ahora buscamos el número de componentes óptimo para cada validación cruzada:
+M13_CV10_M_opt = selectNcomp(M13_CV10, method = "onesigma", plot = TRUE)
+M13_CV5_M_opt = selectNcomp(M13_CV5, method = "onesigma", plot = FALSE)
+
+# Aplicamos predicciones sobre el conjunto de prueba con el número óptimo de
+# componentes principales de cada validación cruzada:
+M13_CV10_predict = predict(M13, 
+                           newdata = df_prueba_13,
+                           ncomp = M13_CV10_M_opt)
+M13_CV5_predict = predict(M13, 
+                          newdata = df_prueba_13,
+                          ncomp = M13_CV5_M_opt)
+# Mismo modelo.
+
+# Calculamos el error de prueba con el conjunto de prueba:
+M13_CV10_ECM = mean( (y_prueba - M13_CV10_predict)^2 )
+M13_CV5_ECM = mean( (y_prueba - M13_CV5_predict)^2 )
+```
+En la gráfica anterior se puede ver el M que minimiza el ECM representado a través de una línea discontinua gris, y el M seleccionado con el método del codo con una línea discontinua azul. Aunque, se podría pensar que incluir 18 componentes principales a partir de 25 variables puede ser poco parsimonioso, viéndose gráficamente como realmente el ECM se estabiliza con 4 componentes principales, y con una segunda estabilización con 9 componentes principales.
+
+## (14)
+El modelo de Mínimos Cuadrados Parciales (PLS) consiste en una técnica similar al modelo de Componentes Principales, con la diferencia de escoger el número óptimo de componentes principales únicamente en base a la varianza explicada de los predictores. En otras palabras, M no se selecciona en base al error de prueba estimado en la regresión lineal, como sí lo hacía el modelo de Componentes Principales visto anteriormente.
+
+Por lo que, estimando el modelo PLS en el conjunto de entrenamiento, se obtiene un M óptimo con la regla del codo de 3 componentes principales a incluir en la regresión. De nuevo, aquí, el M óptimo resultante es independiente de que validación cruzada empleemos de 5-veces o 10-veces. El error de prueba del modelo seleccionado es de 1.20. Como podría esperarse el error de prueba es superior al obtenido en el modelo de Componentes Principales, ya que en este último se captura una mayor parte de la varianza de las características.
+```{r 14}
+# Establecemos la semilla:
+set.seed(641)
+
+# Estimamos el modelo con el conjunto de entrenamiento:
+M14 = plsr(ldurat ~ .,
+           data = df_train_13,
+           scale = TRUE,
+           validation = "CV")
+
+# Mostramos los resultados:
+# summary(M14)
+
+# Aplicamos la validación cruzada 10-veces y 5-veces:
+M14_CV10 = crossval(M14, segments = 10)
+M14_CV5 = crossval(M14, segments = 5)
+
+# Graficamos los ECM calculados mediante VC en el conjunto de entrenamiento:
+# plot(RMSEP(M14_CV10), legendpos="topright")
+# plot(RMSEP(M14_CV5), legendpos="topright")
+
+# Ahora buscamos el número de componentes óptimo para cada validación cruzada:
+M14_CV10_M_opt = selectNcomp(M14_CV10, method = "onesigma", plot = TRUE)
+M14_CV5_M_opt = selectNcomp(M14_CV5, method = "onesigma", plot = FALSE)
+
+# Aplicamos predicciones sobre el conjunto de prueba con el número óptimo de
+# componentes principales de cada validación cruzada:
+M14_CV10_predict = predict(M14, 
+                           newdata = df_prueba_13,
+                           ncomp = M14_CV10_M_opt)
+M14_CV5_predict = predict(M14, 
+                          newdata = df_prueba_13,
+                          ncomp = M14_CV5_M_opt)
+# Mismo modelo.
+
+# Calculamos el error de prueba con el conjunto de prueba:
+M14_CV10_ECM = mean( (y_prueba - M14_CV10_predict)^2 )
+M14_CV5_ECM = mean( (y_prueba - M14_CV5_predict)^2 )
+```
+
+
+## (15)
+```{r 15}
+df_results_15 = data.frame(Ridge = round(c(M12a_ECM, M10_ECM, 
+                                           M12a_lambda_opt, M10_lambda_opt, 
+                                           NA, NA), 6),
+                           
+                           LASSO = round(c(M12b_ECM, M11_ECM, 
+                                           M12b_lambda_opt, M11_lambda_opt, 
+                                           NA, NA), 6),
+                           
+                           CP = round(c(M13_CV5_ECM, M13_CV10_ECM, 
+                                        NA, NA, 
+                                        M13_CV5_M_opt, M13_CV10_M_opt), 6),
+                           
+                           PLS = round(c(M14_CV5_ECM, M14_CV10_ECM, 
+                                         NA, NA, 
+                                         M14_CV5_M_opt, M14_CV10_M_opt), 6),
+                           
+                           row.names = c("CV5_Error", "CV10_Error", 
+                                         "lambda_CV5", "lambda_CV10", 
+                                         "M_CV5", "M_CV10"))
+
+df_results_15
+```
+En la tabla anterior podemos ver los errores de prueba resultantes de estimar cada modelo sobre el conjunto de entrenamiento (85% de los datos) y evaluar la capacidad predictiva sobre el conjunto de prueba (15% de los datos). Todo ello, empleando para cada enfoque la validación cruzada 5-veces y 10-veces para hallar el parámetro óptimo respectivo.
+
+Por tanto, el modelo CP es que obtiene un menor error de prueba, siendo un enfoque óptimo si únicamente se desea predecir la variable ldurat. Como hemos comentado previamente, este enfoque tiene la particularidad de reducir la dimensionalidad de los predictores, hallando componentes principales ortogonales que capturan gran parte de la varianza total en el espacio de las características. Siendo 18 componentes principales el número M óptimo para este modelo.
+
+En cuanto a la comparativa con el apartado (9), de este se extrajo que todos los modelos convergían hacia el mismo número de variables óptimo de 4, con los mismos coeficientes, y por ende, el mismo error de prueba estimado de 1.180105. Siendo esta opción en este caso más atractiva respecto a los modelos estimados en los apartados (10)-(14). Esto se debe al relativo bajo número de variables explicativas disponibles en el dataset que no permite exprimir el potencial de la reducción de la dimensionalidad de los modelos (13) y (14).
+
+Sin embargo, en conjuntos de datos con un gran número de características, podría resultar más atractivo aplicar un modelo de reducción de dimensionalidad como el CP, ya que en estos casos es más probable que el impacto de la multicolinealidad sea mayor y no permita introducir tantas variables como se desearían en los modelos de selección (Mejor Selección de Conjuntos y Selección por Pasos Hacia Adelante). Dando mejores resultados en las estimaciones con los errores de prueba. Además de que, sería costoso computacionalmente trabajar con los modelos de selección, ya que iteran sobre un gran número de variables para estimar una cantidad significativa de modelos.
